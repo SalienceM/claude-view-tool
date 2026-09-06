@@ -233,6 +233,21 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
     return unsubscribe;
   }, [sessionId]);
 
+  // Session 类型可以在 id 不变的情况下由普通会话转换为 LOOP。订阅权威摘要，
+  // 让当前 pane 立即从聊天界面切换到 LoopPanel，无需用户刷新或来回切换 Session。
+  useEffect(() => {
+    if (!sessionId) return;
+    return api.onSessionUpdated((data: any) => {
+      if (data?.sessionId !== sessionId || !data?.summary) return;
+      setActiveSession((current: any) => (
+        current?.id === sessionId ? { ...current, ...data.summary } : current
+      ));
+      if (data.summary.sessionType === 'loop') {
+        setLoopControlMode(data.summary.loopControlMode === 'manual' ? 'manual' : 'loop');
+      }
+    });
+  }, [sessionId]);
+
   // Backend configuration belongs to the executor that owns the session.
   useEffect(() => {
     const execKey = activeSession?.execKey;

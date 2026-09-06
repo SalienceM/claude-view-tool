@@ -93,6 +93,7 @@ from .token_usage import (
 )
 from .update_manager import UpdateManager
 from .release_center import ReleaseCenterManager
+from .poe_api import fetch_poe_overview
 from .kit_capabilities import (
     KitCapabilityContext,
     KitCapabilityError,
@@ -1925,7 +1926,7 @@ class BridgeWS:
             or method.startswith("release")
             or method.startswith("relayNode")
             or method in {
-                "saveBackend", "deleteBackend", "exportBackends",
+                "saveBackend", "deleteBackend", "exportBackends", "poeAccountOverview",
                 "previewBackendImport", "importBackends",
                 "exportData", "importData",
                 "saveMcpServers", "openLoginTerminal", "openModelTerminal",
@@ -4727,6 +4728,95 @@ class BridgeWS:
             "compressedHistory": compressed is not None,
         }, ensure_ascii=False)
 
+    def _rpc_convertSessionToLoop(self, session_id: str, goal: str) -> str:
+        """Convert an idle ordinary Session into a LOOP with an explicit goal.
+
+        The Session id, transcript, Backend/runtime, working directory and native
+        agent thread are retained. Only the rendering/control type changes and a
+        fresh LOOP stage is attached to the same Session.
+        """
+        target = str(goal or "").strip()
+        if not target:
+            return json.dumps({
+                "status": "error", "message": "转换为 LOOP 前必须制定全局目标",
+            }, ensure_ascii=False)
+
+        session = self._active_sessions.get(session_id) or self._session_store.load(session_id)
+        if not session:
+            return json.dumps({
+                "status": "error", "message": "Session 不存在",
+            }, ensure_ascii=False)
+
+        # A response may be lost after the conversion committed. Make a retry
+        # idempotent without replacing the goal of an existing LOOP.
+        if session.session_type == "loop":
+            state = self._loop_state(session_id)
+            return json.dumps({
+                "status": "ok",
+                "alreadyConverted": True,
+                "sessionType": "loop",
+                "stage": state.stage if state else STAGE_IDEA,
+                "goal": state.goal if state else "",
+                "summary": session.meta_dict(),
+            }, ensure_ascii=False)
+        if session.session_type != "normal":
+            return json.dumps({
+                "status": "error", "message": "当前 Session 类型不支持转换为 LOOP",
+            }, ensure_ascii=False)
+
+        busy_reason = self._session_destroy_busy_reason(session_id)
+        if busy_reason:
+            return json.dumps({
+                "status": "error", "message": f"{busy_reason}，结束后才能转换为 LOOP",
+            }, ensure_ascii=False)
+        if self._loop_state(session_id) is not None:
+            return json.dumps({
+                "status": "error", "message": "检测到该 Session 已有 LOOP 状态，请刷新后重试",
+            }, ensure_ascii=False)
+
+        state = LoopState(session_id=session_id, stage=STAGE_EXECUTE, goal=target)
+        state.record_goal(target, source="manual")
+        previous_type = session.session_type
+        previous_control_mode = session.loop_control_mode
+        try:
+            # Stage first: a Session must never advertise itself as LOOP before
+            # its explicit target is durably available to the LoopPanel.
+            self._loop_save(state)
+            session.session_type = "loop"
+            session.loop_control_mode = "loop"
+            self._active_sessions[session_id] = session
+            self._session_store.save(session, async_=False)
+        except Exception as exc:
+            session.session_type = previous_type
+            session.loop_control_mode = previous_control_mode
+            self._loop_states.pop(session_id, None)
+            try:
+                self._loop_store.delete(session_id)
+            except Exception:
+                pass
+            try:
+                self._session_store.save(session, async_=False)
+            except Exception:
+                pass
+            return json.dumps({
+                "status": "error", "message": f"转换失败：{exc}",
+            }, ensure_ascii=False)
+
+        summary = session.meta_dict()
+        self._emit_session_updated({
+            "type": "session_changed",
+            "sessionId": session_id,
+            "summary": summary,
+        })
+        self._emit_loop_updated(state)
+        return json.dumps({
+            "status": "ok",
+            "sessionType": "loop",
+            "stage": state.stage,
+            "goal": state.goal,
+            "summary": summary,
+        }, ensure_ascii=False)
+
     # ── RPC: 可视化 Loop 集成 ────────────────────────────────────
 
     def _loop_state(self, sid: str) -> Optional["LoopState"]:
@@ -6863,7 +6953,7 @@ class BridgeWS:
         # 风险过高（任务大概率完不成）→ 止损
         if state.risk_coefficient >= state.policy.risk_threshold:
             return True, "风险系数过高，停止无谓 loop"
-        # 达到有效最大 loop 上限
+        # 达到用户指定的最大 loop 次数
         if len(state.round_loops()) >= state.effective_max_loops():
             return True, "达到最大 loop 约束"
         return False, ""
@@ -11208,6 +11298,16 @@ Kit 版本账本（版本属于 Kit，不属于 AI）：
                 d["pinned"] = True   # 前端用于区分固定后端
             result.append(d)
         return json.dumps(result, ensure_ascii=False)
+
+    async def _rpc_poeAccountOverview(self, api_key: str = "") -> str:
+        """Read Poe's live API catalog and the current account point balance.
+
+        This RPC is node-management protected because the key belongs to shared executor
+        configuration.  The key is used only for the balance request and is never returned.
+        """
+        if len(str(api_key or "")) > 16_384:
+            return json.dumps({"status": "error", "message": "Poe API Key 过长"}, ensure_ascii=False)
+        return json.dumps(await fetch_poe_overview(api_key), ensure_ascii=False)
 
     def _rpc_exportBackends(self, selected_ids_json: str = "") -> str:
         """Return a controller-downloadable JSON file for selected Backends."""

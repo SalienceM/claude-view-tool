@@ -2496,6 +2496,7 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
 
   // ── 执行节点（session 级模式管理）：默认节点与物理本机是两个独立概念 ──
   const [executors, setExecutors] = useState<ExecutorInfo[]>(() => getAssignableExecutors());
+  const [executorRevision, setExecutorRevision] = useState(0);
   const [execKey, setExecKey] = useState<string>(() => {
     const available = getAssignableExecutors();
     const homeKey = getHomeExecKey();
@@ -2506,6 +2507,8 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
   useEffect(() => onExecStatus(() => {
     const next = getAssignableExecutors();
     setExecutors(next);
+    // 节点 key 不变的断线重连同样需要重读 Backend；仅依赖 execKey 会永久保留旧缓存。
+    setExecutorRevision((current) => current + 1);
     setExecKey((current) => {
       if (next.some((executor) => executor.key === current)) return current;
       const homeKey = getHomeExecKey();
@@ -2516,15 +2519,41 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
   }), []);
   const isHomeExec = execKey === getHomeExecKey();
 
-  // 选中的执行节点对应的后端列表：默认节点直接用上层传入，其余节点按需拉取。
+  // 上层列表只用于弹窗首帧占位。弹窗打开、切换节点或节点重连后，都向所选
+  // 执行节点读取权威清单，避免首屏不完整缓存一直保留到整页刷新。
   const [execBackends, setExecBackends] = useState<any[]>(backends);
+  const [execBackendsLoading, setExecBackendsLoading] = useState(false);
+  const [execBackendsError, setExecBackendsError] = useState('');
+  const execBackendsKeyRef = useRef(execKey);
   useEffect(() => {
     let cancelled = false;
-    if (!execKey) { setExecBackends([]); return; }
-    if (isHomeExec) { setExecBackends(backends); return; }
-    api.getBackends(execKey).then((list) => { if (!cancelled) setExecBackends(list || []); });
+    if (!execKey) {
+      execBackendsKeyRef.current = '';
+      setExecBackends([]);
+      setExecBackendsLoading(false);
+      setExecBackendsError('');
+      return;
+    }
+
+    const keyChanged = execBackendsKeyRef.current !== execKey;
+    execBackendsKeyRef.current = execKey;
+    setExecBackends((current) => {
+      if (keyChanged) return isHomeExec ? backends : [];
+      return current.length ? current : (isHomeExec ? backends : current);
+    });
+    setExecBackendsLoading(true);
+    setExecBackendsError('');
+    api.getBackends(execKey).then((list) => {
+      if (!cancelled) setExecBackends(Array.isArray(list) ? list : []);
+    }).catch((error: any) => {
+      if (!cancelled) {
+        setExecBackendsError(error?.message || '无法读取所选执行节点的 Backend');
+      }
+    }).finally(() => {
+      if (!cancelled) setExecBackendsLoading(false);
+    });
     return () => { cancelled = true; };
-  }, [execKey, isHomeExec, backends]);
+  }, [execKey, isHomeExec, backends, executorRevision]);
 
   const [selectedBackendId, setSelectedBackendId] = useState(
     backends[0]?.id || 'claude-agent-sdk-default'
@@ -2601,6 +2630,7 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
     if (!execKey) return;
     // 空值交给后端补一个时间戳目录
     const backend = execBackends.find((item) => item.id === selectedBackendId);
+    if (!backend || execBackendsLoading) return;
     const runtime = isRuntimeConfigurableBackend(backend) ? normalizeModelRuntime(sessionRuntime) : {};
     const selectedThread = remoteThreads.find((item) => item.id === remoteThreadId);
     const codexRemote = isCodexBackend(backend) && codexLocation !== 'local'
@@ -2612,14 +2642,14 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
       : {};
     await onCreate(workingDir.trim() || '', selectedBackendId, sessionType,
       sessionType === 'loop' ? normalizePolicy(loopPolicy) : undefined, runtime, execKey, codexRemote);
-  }, [workingDir, selectedBackendId, sessionType, loopPolicy, sessionRuntime, execKey, execBackends, onCreate, codexLocation, remoteThreadId, remoteThreads]);
+  }, [workingDir, selectedBackendId, sessionType, loopPolicy, sessionRuntime, execKey, execBackends, execBackendsLoading, onCreate, codexLocation, remoteThreadId, remoteThreads]);
 
   const handleBrowse = useCallback(() => {
     // 本机与远端统一浏览“执行节点”的文件系统，保证两边都支持新建与重命名目录。
     setDirPickerOpen(true);
   }, []);
 
-  const codexCreateBlocked = !execKey || (
+  const createBlocked = !execKey || execBackendsLoading || !selectedBackend || (
     isCodex && codexLocation === 'node'
       ? (remoteLoading || !remoteThreadId)
       : false
@@ -2779,10 +2809,16 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
           <label style={labelStyle}>Backend:</label>
           <div style={selectWrapperStyle}>
             <select
-              value={selectedBackendId}
+              value={selectedBackend ? selectedBackendId : ''}
               onChange={(e) => setSelectedBackendId(e.target.value)}
               style={selectStyle}
+              disabled={execBackendsLoading && execBackends.length === 0}
             >
+              {!selectedBackend && (
+                <option value="" disabled>
+                  {execBackendsLoading ? '正在读取 Backend…' : '当前节点没有可用 Backend'}
+                </option>
+              )}
               {execBackends.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.label}
@@ -2790,7 +2826,13 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
               ))}
             </select>
           </div>
-          <span style={helpTextStyle}>Backend 负责账号、连接和 CLI；支持的模型与推理档位在下方按 Session 单独选择。</span>
+          <span style={{ ...helpTextStyle, color: execBackendsError ? '#f87171' : undefined }}>
+            {execBackendsError
+              ? `${execBackendsError}；当前显示的是最近缓存，重新打开弹窗或节点恢复后会重试。`
+              : execBackendsLoading
+                ? '正在与所选执行节点同步 Backend 清单…'
+                : 'Backend 负责账号、连接和 CLI；支持的模型与推理档位在下方按 Session 单独选择。'}
+          </span>
         </div>
 
         {runtimeConfigurable && (
@@ -2842,8 +2884,8 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
           <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
           <button
             onClick={handleCreate}
-            disabled={codexCreateBlocked}
-            style={{ ...confirmBtnStyle, opacity: codexCreateBlocked ? 0.5 : 1 }}
+            disabled={createBlocked}
+            style={{ ...confirmBtnStyle, opacity: createBlocked ? 0.5 : 1 }}
           >
             Create Session
           </button>

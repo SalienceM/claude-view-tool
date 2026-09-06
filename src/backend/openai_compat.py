@@ -72,6 +72,8 @@ class OpenAICompatibleBackend(ModelBackend):
             headers = {"Content-Type": "application/json"}
             if self.config.api_key:
                 headers["Authorization"] = f"Bearer {self.config.api_key}"
+            if self.config.extra_headers:
+                headers.update(self.config.extra_headers)
 
             # 转换 Anthropic 格式 tools 到 OpenAI 格式
             oai_tools: Optional[list[dict]] = None
@@ -280,5 +282,4 @@ class OpenAICompatibleBackend(ModelBackend):
                 emit("error", error=_exc_msg(e))
             emit("done")
             return {}
-
 

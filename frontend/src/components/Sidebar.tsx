@@ -72,6 +72,10 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
   } | null>(null);
   const [sessionToDelete, setSessionToDelete] = useState<Session | null>(null);
   const [sessionToDestroy, setSessionToDestroy] = useState<Session | null>(null);
+  const [sessionToConvert, setSessionToConvert] = useState<Session | null>(null);
+  const [conversionGoal, setConversionGoal] = useState('');
+  const [conversionError, setConversionError] = useState('');
+  const [converting, setConverting] = useState(false);
   const [destroyConfirmValue, setDestroyConfirmValue] = useState('');
   const [destroyError, setDestroyError] = useState('');
   const [destroying, setDestroying] = useState(false);
@@ -397,6 +401,40 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
       alert(result.message || '会话外观保存失败');
     }
   }, []);
+
+  const openLoopConversion = useCallback((session: Session) => {
+    setSessionToConvert(session);
+    setConversionGoal('');
+    setConversionError('');
+    setConverting(false);
+  }, []);
+
+  const confirmLoopConversion = useCallback(async () => {
+    if (!sessionToConvert || converting) return;
+    const goal = conversionGoal.trim();
+    if (!goal) {
+      setConversionError('请先填写 LOOP 的全局目标');
+      return;
+    }
+    setConverting(true);
+    setConversionError('');
+    try {
+      const result = await api.convertSessionToLoop(sessionToConvert.id, goal);
+      if (result.status !== 'ok') {
+        setConversionError(result.message || '转换失败');
+        return;
+      }
+      const convertedId = sessionToConvert.id;
+      setSessionToConvert(null);
+      setConversionGoal('');
+      await refresh();
+      onSelectSession(convertedId);
+    } catch (error: any) {
+      setConversionError(error?.message || '转换失败');
+    } finally {
+      setConverting(false);
+    }
+  }, [conversionGoal, converting, onSelectSession, refresh, sessionToConvert]);
 
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const visibleSessions = useMemo(() => {
@@ -984,6 +1022,26 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
             <span className="awu-session-context-icon">🧩</span>
             <span>绑定能力</span>
           </button>
+          {sessionContextMenu.session.sessionType !== 'loop' && (
+            <button
+              type="button"
+              className="awu-session-context-item"
+              role="menuitem"
+              disabled={streamingSessions.has(sessionContextMenu.session.id)}
+              title={streamingSessions.has(sessionContextMenu.session.id)
+                ? '会话运行中，结束后才能转换为 LOOP'
+                : '保留当前会话、聊天记录和工作目录，制定目标后转为 LOOP'}
+              onClick={(event) => {
+                event.stopPropagation();
+                const target = sessionContextMenu.session;
+                setSessionContextMenu(null);
+                openLoopConversion(target);
+              }}
+            >
+              <span className="awu-session-context-icon">🔁</span>
+              <span>转为 LOOP…</span>
+            </button>
+          )}
           <div className="awu-session-context-separator" role="separator" />
           <button
             type="button"
@@ -1303,6 +1361,84 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
             </div>
           </div>
         </div>
+      )}
+
+      {/* 普通 Session 转 LOOP：转换时必须明确制定目标。 */}
+      {sessionToConvert && (
+        <AppModalPortal>
+          <div style={overlayStyle} onClick={() => { if (!converting) setSessionToConvert(null); }}>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="awu-convert-loop-title"
+              style={{ ...confirmPanelStyle, width: 'min(520px, calc(100vw - 32px))', maxWidth: 520 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 id="awu-convert-loop-title" style={{ margin: '0 0 8px', fontSize: 17, color: 'var(--theme-text)' }}>
+                🔁 转为 LOOP
+              </h3>
+              <p style={{ margin: '0 0 6px', fontSize: 13, lineHeight: 1.6, color: 'var(--theme-text-muted)' }}>
+                将 <strong style={{ color: 'var(--theme-text)' }}>{sessionToConvert.title}</strong> 转为 LOOP。
+                当前聊天记录、Backend 和工作目录都会保留。
+              </p>
+              <div style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--theme-text-muted)' }}>
+                转换后直接进入 Execute，由你手动开始第一轮；不会自动运行。
+              </div>
+              <label htmlFor="awu-convert-loop-goal" style={{ display: 'block', marginBottom: 6, fontSize: 12, fontWeight: 700, color: 'var(--theme-text)' }}>
+                全局目标 <span style={{ color: 'var(--theme-error, #cf222e)' }}>*</span>
+              </label>
+              <textarea
+                id="awu-convert-loop-goal"
+                autoFocus
+                value={conversionGoal}
+                disabled={converting}
+                onChange={(event) => {
+                  setConversionGoal(event.target.value);
+                  if (conversionError) setConversionError('');
+                }}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                    event.preventDefault();
+                    void confirmLoopConversion();
+                  }
+                }}
+                placeholder="写清最终要交付什么，以及怎样判断完成…"
+                style={{
+                  width: '100%', minHeight: 118, resize: 'vertical', boxSizing: 'border-box',
+                  padding: '10px 12px', borderRadius: 8, border: '1px solid var(--theme-border)',
+                  background: 'var(--theme-bg-secondary)', color: 'var(--theme-text)',
+                  font: 'inherit', fontSize: 13, lineHeight: 1.55, outline: 'none',
+                }}
+              />
+              {conversionError && (
+                <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--theme-error, #cf222e)' }}>
+                  {conversionError}
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                <button
+                  type="button"
+                  onClick={() => setSessionToConvert(null)}
+                  disabled={converting}
+                  style={cancelBtnStyle}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void confirmLoopConversion()}
+                  disabled={converting || !conversionGoal.trim()}
+                  style={{ ...confirmBtnStyle, opacity: converting || !conversionGoal.trim() ? 0.55 : 1 }}
+                >
+                  {converting ? '转换中…' : '确认转为 LOOP'}
+                </button>
+              </div>
+              <div style={{ marginTop: 9, textAlign: 'right', fontSize: 10.5, color: 'var(--theme-text-muted)' }}>
+                Ctrl/⌘ + Enter 确认
+              </div>
+            </div>
+          </div>
+        </AppModalPortal>
       )}
 
       {/* 销毁与普通删除严格分离：必须输入中文“销毁”后才能触发执行端目录删除。 */}

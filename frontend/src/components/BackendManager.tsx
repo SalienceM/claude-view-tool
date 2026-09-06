@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   api, getExecutors, getHomeExecKey, onExecStatus,
-  type BackendImportPreviewItem, type ExecutorInfo,
+  type BackendImportPreviewItem, type ExecutorInfo, type PoeAccountOverview,
 } from '../api';
 import { sessionsForBackendExecutor } from '../utils/backendManagement';
 
@@ -38,6 +38,28 @@ interface BackendConfig {
   cliPath?: string;  // qwen-code-cli: 自定义 CLI 路径
   qwenContextWindowSize?: number;
   qwenMaxOutputTokens?: number;
+}
+
+const POE_API_BASE_URL = 'https://api.poe.com/v1';
+
+function isPoeBackendConfig(config: Pick<BackendConfig, 'type' | 'baseUrl'>): boolean {
+  if (config.type !== 'openai-compatible') return false;
+  try {
+    const url = new URL(String(config.baseUrl || '').trim());
+    return url.protocol === 'https:'
+      && url.hostname.toLowerCase() === 'api.poe.com'
+      && url.pathname.replace(/\/+$/, '') === '/v1';
+  } catch {
+    return false;
+  }
+}
+
+function formatPoeTime(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '时间未知';
+  return new Date(value).toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
 }
 
 const OFFICIAL_BACKEND_ID = 'official-claude';
@@ -235,6 +257,11 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
   const [transferState, setTransferState] = useState<BackendTransferState | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const [poeOverview, setPoeOverview] = useState<PoeAccountOverview | null>(null);
+  const [poeLoading, setPoeLoading] = useState(false);
+  const [poeError, setPoeError] = useState('');
+  const [poeQuery, setPoeQuery] = useState('');
+  const poeRequestRef = useRef(0);
 
   // MCP tab state
   const [activeTab, setActiveTab] = useState<'backends' | 'mcp'>('backends');
@@ -246,11 +273,21 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
   const [mcpSaveMsg, setMcpSaveMsg] = useState<string | null>(null);
 
   const selectedExecutor = executors.find((item) => item.key === targetExecKey);
+  const isPoeBackend = isPoeBackendConfig(formData);
   const nodeSessions = sessionsForBackendExecutor(
     sessions,
     targetExecKey,
     getHomeExecKey(),
   );
+  const normalizedPoeQuery = poeQuery.trim().toLowerCase();
+  const poeVisibleModels = (poeOverview?.models || [])
+    .filter((item) => !normalizedPoeQuery
+      || item.id.toLowerCase().includes(normalizedPoeQuery)
+      || item.description.toLowerCase().includes(normalizedPoeQuery))
+    .slice(0, 12);
+  const poeRecentCount = (poeOverview?.models || []).filter(
+    (item) => item.createdAt >= Date.now() - 30 * 86_400_000,
+  ).length;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -273,7 +310,50 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
     setTransferState(null);
     if (importFileInputRef.current) importFileInputRef.current.value = '';
     window.__targetBackendForMigration = undefined;
+    setPoeOverview(null);
+    setPoeLoading(false);
+    setPoeError('');
+    setPoeQuery('');
+    poeRequestRef.current += 1;
   }, [targetExecKey]);
+
+  const refreshPoeOverview = useCallback(async () => {
+    const requestId = ++poeRequestRef.current;
+    setPoeLoading(true);
+    setPoeError('');
+    try {
+      const result = await api.poeAccountOverview(formData.apiKey || '', targetExecKey);
+      if (requestId !== poeRequestRef.current) return;
+      setPoeOverview(result);
+      if (result.status === 'error' && result.models.length === 0 && result.currentPointBalance == null) {
+        setPoeError(result.message || result.catalogError || result.balanceError || '无法读取 Poe 状态');
+      }
+    } catch (error: any) {
+      if (requestId !== poeRequestRef.current) return;
+      setPoeError(error?.message || '无法读取 Poe 状态');
+    } finally {
+      if (requestId === poeRequestRef.current) setPoeLoading(false);
+    }
+  }, [formData.apiKey, targetExecKey]);
+
+  // 进入一个 Poe 配置时实时拉取一次。编辑 Key 不会逐字触发；填写完成后可手动刷新余额。
+  const poeFormIdentity = `${targetExecKey}:${formData.id}:${isPoeBackend ? 'poe' : 'other'}`;
+  useEffect(() => {
+    if (!isEditing || !isPoeBackend) {
+      poeRequestRef.current += 1;
+      setPoeOverview(null);
+      setPoeLoading(false);
+      setPoeError('');
+      setPoeQuery('');
+      return;
+    }
+    setPoeOverview(null);
+    setPoeError('');
+    setPoeQuery('');
+    void refreshPoeOverview();
+    // API Key 刻意不属于自动刷新身份，避免输入时连续请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, isPoeBackend, poeFormIdentity]);
 
   const toggleTransferSelection = useCallback((id: string, checked: boolean) => {
     setTransferState((current) => {
@@ -1141,7 +1221,7 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
                       <option value="claude-agent-sdk">Claude Agent SDK</option>
                       <option value="qwen-code-cli">Qwen Code CLI</option>
                       <option value="codex-office">Codex Office</option>
-                      <option value="openai-compatible">OpenAI Compatible</option>
+                      <option value="openai-compatible">OpenAI Compatible / Poe</option>
                       <option value="anthropic-api">Anthropic API</option>
                       <option value="dashscope-image">DashScope 图像（Wan / Qwen Image 3.0）</option>
                     </select>
@@ -1972,10 +2052,23 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
             {/* ── OpenAI Compatible 专属配置 ── */}
             {formData.type === 'openai-compatible' && (
               <div style={{ marginBottom: 16, padding: 12, background: 'var(--theme-bg-secondary)', borderRadius: 8 }}>
-                <label style={{ ...labelStyle, marginBottom: 8 }}>OpenAI Compatible 配置</label>
-                <p style={{ fontSize: 11, color: 'var(--theme-text-muted)', margin: '0 0 12px 0' }}>
-                  兼容 OpenAI Chat Completions API 的服务（OpenAI、通义、DeepSeek、Ollama 等）。
-                </p>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                  <div>
+                    <label style={{ ...labelStyle, marginBottom: 4 }}>OpenAI Compatible 配置</label>
+                    <p style={{ fontSize: 11, color: 'var(--theme-text-muted)', margin: 0, lineHeight: 1.5 }}>
+                      兼容 OpenAI Chat Completions API 的服务；Poe 可额外读取实时模型目录与账号积分。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFormData((current) => ({
+                      ...current,
+                      label: current.label.trim() ? current.label : 'Poe API',
+                      baseUrl: POE_API_BASE_URL,
+                    }))}
+                    style={{ ...cancelBtnStyle, flex: 'none', padding: '6px 9px', fontSize: 11, whiteSpace: 'nowrap' }}
+                  >{isPoeBackend ? '✓ Poe 已识别' : '套用 Poe'}</button>
+                </div>
 
                 <div style={{ marginBottom: 10 }}>
                   <label style={{ fontSize: 11, color: 'var(--theme-text)', display: 'block', marginBottom: 4 }}>
@@ -2012,9 +2105,132 @@ export const BackendManager: React.FC<BackendManagerProps> = ({
                     value={formData.model || ''}
                     onChange={(e) => setFormData({ ...formData, model: e.target.value })}
                     style={inputStyle}
+                    list={isPoeBackend && poeOverview?.models.length ? 'poe-live-model-options' : undefined}
                     placeholder="e.g., gpt-4o / deepseek-chat / qwen-plus"
                   />
+                  {isPoeBackend && poeOverview?.models.length ? (
+                    <datalist id="poe-live-model-options">
+                      {poeOverview.models.map((item) => (
+                        <option key={item.id} value={item.id}>{item.description.slice(0, 100)}</option>
+                      ))}
+                    </datalist>
+                  ) : null}
                 </div>
+
+                {isPoeBackend && (
+                  <div style={{
+                    marginBottom: 12, padding: 11, borderRadius: 8,
+                    border: '1px solid rgba(99,102,241,.28)',
+                    background: 'rgba(99,102,241,.07)',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 650, color: 'var(--theme-text)' }}>
+                          ◈ Poe 实时入口
+                        </div>
+                        <div style={{ marginTop: 3, fontSize: 10.5, color: 'var(--theme-text-muted)' }}>
+                          API 可用目录与当前账号积分；每次刷新都直接查询 Poe。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshPoeOverview()}
+                        disabled={poeLoading || !selectedExecutor?.connected}
+                        style={{ ...cancelBtnStyle, flex: 'none', padding: '6px 9px', fontSize: 11, opacity: poeLoading ? .55 : 1 }}
+                      >{poeLoading ? '查询中…' : '↻ 实时刷新'}</button>
+                    </div>
+
+                    {poeError && (
+                      <div style={{ marginBottom: 8, color: 'rgba(248,113,113,.98)', fontSize: 10.5, lineHeight: 1.5 }}>
+                        {poeError}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, marginBottom: 9 }}>
+                      <div style={{ padding: '8px 9px', borderRadius: 7, background: 'var(--theme-input-bg)', border: '1px solid var(--theme-border)' }}>
+                        <div style={{ fontSize: 10, color: 'var(--theme-text-muted)' }}>当前可用积分</div>
+                        <div style={{ marginTop: 2, fontSize: 18, fontWeight: 700, color: 'var(--theme-text)' }}>
+                          {poeOverview?.currentPointBalance != null
+                            ? poeOverview.currentPointBalance.toLocaleString()
+                            : '—'}
+                        </div>
+                        {poeOverview?.balanceError && (
+                          <div style={{ marginTop: 3, fontSize: 9.5, lineHeight: 1.4, color: 'var(--theme-text-muted)' }}>
+                            {poeOverview.balanceError}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ padding: '8px 9px', borderRadius: 7, background: 'var(--theme-input-bg)', border: '1px solid var(--theme-border)' }}>
+                        <div style={{ fontSize: 10, color: 'var(--theme-text-muted)' }}>API 可用模型 / Bot</div>
+                        <div style={{ marginTop: 2, fontSize: 18, fontWeight: 700, color: 'var(--theme-text)' }}>
+                          {poeOverview ? poeOverview.modelCount.toLocaleString() : '—'}
+                        </div>
+                        <div style={{ marginTop: 3, fontSize: 9.5, color: 'var(--theme-text-muted)' }}>
+                          近 30 天上架 {poeRecentCount} 项
+                        </div>
+                      </div>
+                    </div>
+
+                    {poeOverview?.catalogError && (
+                      <div style={{ marginBottom: 8, color: 'rgba(248,113,113,.98)', fontSize: 10.5, lineHeight: 1.5 }}>
+                        {poeOverview.catalogError}
+                      </div>
+                    )}
+
+                    {(poeOverview?.models.length || 0) > 0 && (
+                      <>
+                        <input
+                          type="search"
+                          value={poeQuery}
+                          onChange={(event) => setPoeQuery(event.target.value)}
+                          style={{ ...inputStyle, padding: '7px 9px', fontSize: 11, marginBottom: 7 }}
+                          placeholder="搜索实时目录中的模型或公开 Bot…"
+                        />
+                        <div style={{ marginBottom: 5, fontSize: 10, fontWeight: 600, color: 'var(--theme-text-muted)' }}>
+                          {normalizedPoeQuery ? `搜索结果（显示前 ${poeVisibleModels.length} 项）` : '最新上架（按 Poe created 时间）'}
+                        </div>
+                        <div style={{ maxHeight: 250, overflowY: 'auto', border: '1px solid var(--theme-border)', borderRadius: 7 }}>
+                          {poeVisibleModels.length === 0 ? (
+                            <div style={{ padding: 12, textAlign: 'center', color: 'var(--theme-text-muted)', fontSize: 11 }}>没有匹配项</div>
+                          ) : poeVisibleModels.map((item) => (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => setFormData((current) => ({ ...current, model: item.id }))}
+                              style={{
+                                width: '100%', padding: '7px 8px', display: 'flex', alignItems: 'center', gap: 8,
+                                border: 0, borderBottom: '1px solid var(--theme-border)', textAlign: 'left', cursor: 'pointer',
+                                color: 'var(--theme-text)', background: formData.model === item.id ? 'var(--theme-accent-bg)' : 'transparent',
+                              }}
+                              title={item.description || item.id}
+                            >
+                              <span style={{ minWidth: 0, flex: 1 }}>
+                                <span style={{ display: 'block', fontSize: 11, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {item.id}
+                                </span>
+                                <span style={{ display: 'block', marginTop: 2, fontSize: 9.5, color: 'var(--theme-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {item.description || '暂无说明'}
+                                </span>
+                              </span>
+                              <span style={{ flexShrink: 0, fontSize: 9.5, color: 'var(--theme-text-muted)' }}>
+                                {formatPoeTime(item.createdAt)}
+                              </span>
+                              <span style={{ flexShrink: 0, fontSize: 10, color: formData.model === item.id ? 'var(--theme-accent)' : 'var(--theme-text-muted)' }}>
+                                {formData.model === item.id ? '已选' : '选用'}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    <div style={{ marginTop: 7, fontSize: 9.5, lineHeight: 1.45, color: 'var(--theme-text-muted)' }}>
+                      {poeOverview?.fetchedAt ? `最后查询：${formatPoeTime(poeOverview.fetchedAt)}。` : ''}
+                      余额是 API 返回的当前可用积分总数；Poe 暂不返回套餐总额、已用量或到期拆分。
+                      目录仅代表 API 可调用项，不等同于 Poe Explore 全站榜单，私有 Bot 目前不可通过 API 调用。
+                    </div>
+                  </div>
+                )}
 
                 <div style={{ marginBottom: 0 }}>
                   <label style={{ fontSize: 11, color: 'var(--theme-text)', display: 'block', marginBottom: 4 }}>

@@ -40,11 +40,15 @@ test.describe.serial('small-screen touch dashboard acceptance', () => {
       !['mobile-chromium', 'narrow-mobile-chromium'].includes(testInfo.project.name),
       'This suite only runs in the step 7 touch viewports.',
     );
+    const backendCleanup = await request.get(`${CONTROL_URL}/backend/fixture/remove-late`);
+    expect(backendCleanup.ok()).toBeTruthy();
     const cleanupResponse = await request.get(`${CONTROL_URL}/event/task/remove`);
     expect(cleanupResponse.ok()).toBeTruthy();
   });
 
   test.afterEach(async ({ request }) => {
+    const backendCleanup = await request.get(`${CONTROL_URL}/backend/fixture/remove-late`);
+    expect(backendCleanup.ok()).toBeTruthy();
     const cleanupResponse = await request.get(`${CONTROL_URL}/event/task/remove`);
     expect(cleanupResponse.ok()).toBeTruthy();
   });
@@ -180,6 +184,25 @@ test.describe.serial('small-screen touch dashboard acceptance', () => {
       body: JSON.stringify(results, null, 2),
       contentType: 'application/json',
     });
+  });
+
+  test('new-session dialog refreshes a changed Backend inventory without reloading the page', async ({ page, request }) => {
+    await openCleanHome(page);
+
+    await page.locator('.home-action-grid button').first().click();
+    const backendField = page.getByText('Backend:', { exact: true }).locator('..');
+    await expect(backendField.getByText(/Backend 负责账号/)).toBeVisible();
+    await expect(backendField.locator('option[value="qa-late-backend"]')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    const addResponse = await request.get(`${CONTROL_URL}/backend/fixture/add-late`);
+    expect(addResponse.ok()).toBeTruthy();
+
+    // 页面顶层仍持有旧清单；重新打开弹窗必须向执行节点读取，而不是要求整页刷新。
+    await page.locator('.home-action-grid button').first().click();
+    const refreshedBackendField = page.getByText('Backend:', { exact: true }).locator('..');
+    await expect(refreshedBackendField.locator('option[value="qa-late-backend"]')).toHaveCount(1);
+    await expect(refreshedBackendField.getByText(/Backend 负责账号/)).toBeVisible();
   });
 
   test('scrolling and a live update remain stable', async ({ page, request }, testInfo) => {

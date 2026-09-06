@@ -67,12 +67,13 @@ export const DEFAULT_POLICY: LoopPolicy = {
   strategy: DEFAULT_STRATEGY,
 };
 
-/** 兜底归一：补默认 + 夹取范围（可输出门槛不低于可交付门槛）。 */
+/** 兜底归一：补默认 + 夹取必要范围（可输出门槛不低于可交付门槛）。 */
 export function normalizePolicy(p?: Partial<LoopPolicy> | null): LoopPolicy {
   const d = { ...DEFAULT_POLICY, ...(p || {}) };
   const del = clamp(num(d.deliverableScore, 70), 0, 100);
   const out = clamp(num(d.outputtableScore, 85), del, 100);
-  const ml = Math.round(clamp(num(d.maxLoops, 8), 1, 50));
+  // Loop 次数由用户决定，不设产品级上限；只归一为正整数。
+  const ml = Math.max(1, Math.round(num(d.maxLoops, 8)));
   const rt = clamp(num(d.riskThreshold, 0.85), 0.1, 1);
   const stall = Math.round(clamp(num(d.stepStallSeconds, 300), 30, 3600));
   const attempts = Math.round(clamp(num(d.stepMaxAttempts, 2), 1, 3));
@@ -194,8 +195,8 @@ export const LoopPolicyEditor: React.FC<{
           min={0} max={100} step={1} onChange={(v) => set({ deliverableScore: v })} />
         <NumField label="可输出门槛" hint="分数 ≥ 此值视为可输出" value={value.outputtableScore}
           min={0} max={100} step={1} onChange={(v) => set({ outputtableScore: v })} />
-        <NumField label="最大 Loop 数" hint="基础上限（风险越高实际越少）" value={value.maxLoops}
-          min={1} max={50} step={1} onChange={(v) => set({ maxLoops: v })} />
+        <NumField label="最大 Loop 数" hint="本轮次数预算，不设固定上限" value={value.maxLoops}
+          min={1} step={1} onChange={(v) => set({ maxLoops: v })} />
         <NumField label="风险止损阈值" hint="风险系数 ≥ 此值即收口" value={value.riskThreshold}
           min={0.1} max={1} step={0.05} onChange={(v) => set({ riskThreshold: v })} />
         <NumField label="单步无活动超时（秒）" hint="无任何模型/工具事件后自动止损" value={value.stepStallSeconds}
@@ -357,7 +358,7 @@ export const LoopPolicyEditor: React.FC<{
 };
 
 const NumField: React.FC<{
-  label: string; hint: string; value: number; min: number; max: number; step: number;
+  label: string; hint: string; value: number; min: number; max?: number; step: number;
   onChange: (v: number) => void;
 }> = ({ label, hint, value, min, max, step, onChange }) => (
   <div style={{ flex: '1 1 120px', minWidth: 120 }}>

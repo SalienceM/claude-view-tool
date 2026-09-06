@@ -75,6 +75,24 @@ export interface BackendImportResult {
   changedIds?: string[];
 }
 
+export interface PoeModelInfo {
+  id: string;
+  createdAt: number;
+  description: string;
+  ownedBy?: string;
+}
+
+export interface PoeAccountOverview {
+  status: 'ok' | 'error' | string;
+  models: PoeModelInfo[];
+  modelCount: number;
+  catalogError?: string;
+  currentPointBalance: number | null;
+  balanceError?: string;
+  fetchedAt: number;
+  message?: string;
+}
+
 /** 当前 Web/桌面 Backend 作为 Relay 执行节点的注册状态。 */
 export interface RelayNodeStatus {
   supported: boolean;
@@ -2196,6 +2214,20 @@ export const api = {
     try { return JSON.parse(result); } catch { return { status: 'error', message: '响应格式错误' }; }
   },
 
+  async convertSessionToLoop(sessionId: string, goal: string): Promise<{
+    status: string;
+    sessionType?: 'loop';
+    stage?: string;
+    goal?: string;
+    summary?: any;
+    alreadyConverted?: boolean;
+    message?: string;
+  }> {
+    const result = await call('convertSessionToLoop', sessionId, goal);
+    if (result === null || result === undefined) return { status: 'error', message: '无法连接到执行节点' };
+    try { return JSON.parse(result); } catch { return { status: 'error', message: '转换响应格式错误' }; }
+  },
+
   async updateSessionAppearance(
     sessionId: string,
     patch: { pinned?: boolean; sidebarColor?: string },
@@ -2223,6 +2255,32 @@ export const api = {
       ? await callOnStrict(execKey, 'getBackends', params, 10_000)
       : await homeConn.request('getBackends', params);
     try { return JSON.parse(result); } catch { return []; }
+  },
+
+  async poeAccountOverview(apiKey = '', execKey?: string): Promise<PoeAccountOverview> {
+    const result = execKey
+      ? await callOnStrict(execKey, 'poeAccountOverview', [apiKey], 30_000)
+      : await homeConn.request('poeAccountOverview', [apiKey]);
+    try {
+      const parsed = JSON.parse(result);
+      return {
+        status: parsed?.status || 'error',
+        models: Array.isArray(parsed?.models) ? parsed.models : [],
+        modelCount: Number(parsed?.modelCount || 0),
+        catalogError: parsed?.catalogError || '',
+        currentPointBalance: typeof parsed?.currentPointBalance === 'number'
+          ? parsed.currentPointBalance
+          : null,
+        balanceError: parsed?.balanceError || '',
+        fetchedAt: Number(parsed?.fetchedAt || 0),
+        message: parsed?.message,
+      };
+    } catch {
+      return {
+        status: 'error', models: [], modelCount: 0,
+        currentPointBalance: null, fetchedAt: 0, message: 'Poe 状态响应格式错误',
+      };
+    }
   },
 
   async getSessionTokenUsage(id: string): Promise<any | null> {
@@ -4260,6 +4318,9 @@ function mockDispatch(method: string, params: any[]): any {
     case 'loopRemoveIdea': return JSON.stringify({ status: 'ok' });
     case 'loopSealIdea': return JSON.stringify({ status: 'error', message: 'mock mode' });
     case 'loopSetGoal': return JSON.stringify({ status: 'ok' });
+    case 'convertSessionToLoop': return JSON.stringify({
+      status: 'ok', sessionType: 'loop', stage: 'loopexecute', goal: params[1] || '',
+    });
     case 'loopRefineGoal': return JSON.stringify({ status: 'error', message: 'mock mode' });
     case 'loopSetPolicy': return JSON.stringify({ status: 'ok' });
     case 'loopPolicyPresetList': return JSON.stringify({ status: 'ok', presets: [] });
@@ -4326,6 +4387,17 @@ function mockDispatch(method: string, params: any[]): any {
     case 'deleteSession': return true;
     case 'destroySession': return JSON.stringify({ status: 'error', message: 'mock mode 不执行目录销毁' });
     case 'getBackends': return JSON.stringify(mockBackends);
+    case 'poeAccountOverview': return JSON.stringify({
+      status: 'ok',
+      models: [
+        { id: 'assistant', createdAt: Date.now() - 86_400_000, description: 'Poe 自动路由助手' },
+        { id: 'GPT-5.4', createdAt: Date.now() - 172_800_000, description: 'OpenAI model on Poe' },
+      ],
+      modelCount: 2,
+      currentPointBalance: params[0] ? 1500 : null,
+      balanceError: params[0] ? '' : '请填写 Poe API Key 后刷新余额',
+      fetchedAt: Date.now(),
+    });
     case 'saveBackend': {
       const cfg = JSON.parse(params[0]);
       const idx = mockBackends.findIndex((b) => b.id === cfg.id);

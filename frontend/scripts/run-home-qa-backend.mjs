@@ -17,6 +17,7 @@ let controlServer;
 let stopping = false;
 let backendIntentionalStop = false;
 let injectedTaskIds = [];
+const lateBackendId = 'qa-late-backend';
 const eventSessionId = profile === 'stress' ? 'qa-chat-060' : 'qa-chat-004';
 
 function startBackend() {
@@ -128,6 +129,24 @@ async function injectTask() {
   return taskId;
 }
 
+async function removeLateBackend() {
+  await rpc('deleteBackend', [lateBackendId]);
+}
+
+async function addLateBackend() {
+  await removeLateBackend();
+  await rpc('saveBackend', [JSON.stringify({
+    id: lateBackendId,
+    type: 'openai-compatible',
+    label: 'QA 延迟出现模型',
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:9/v1',
+    model: 'qa-late',
+    apiKey: 'qa-placeholder',
+    skipPermissions: true,
+  })]);
+}
+
 function startControlServer() {
   controlServer = http.createServer(async (request, response) => {
     try {
@@ -139,6 +158,12 @@ function startControlServer() {
         startBackend();
         await waitForBackend();
         json(response, 200, { status: 'started' });
+      } else if (url.pathname === '/backend/fixture/add-late') {
+        await addLateBackend();
+        json(response, 200, { status: 'added', backendId: lateBackendId });
+      } else if (url.pathname === '/backend/fixture/remove-late') {
+        await removeLateBackend();
+        json(response, 200, { status: 'removed', backendId: lateBackendId });
       } else if (url.pathname === '/event/task/burst') {
         const count = Math.max(1, Math.min(50, Number(url.searchParams.get('count')) || 20));
         const taskIds = [];

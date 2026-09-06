@@ -52,6 +52,7 @@ const SECTIONS: ManualSection[] = [
   {
     id: 'loop', title: 'Loop 深度任务', icon: '🔁', intro: '让模型多轮执行、评审和优化同一个完整目标。',
     items: [
+      { icon: '🔁', title: '普通 Session 转 LOOP', summary: '保留原会话的聊天记录、Backend、工作目录和原生 Agent 上下文，制定全局目标后直接进入 Execute；转换完成后由你手动开始第一轮。', entry: '侧栏右键普通 Session → 转为 LOOP', tips: '运行中的会话需先等待当前回答结束。' },
       { icon: '💡', title: 'Idea 构想阶段', summary: '并行扩展多个想法，支持文字和图片。封存后综合成全局目标，原始诉求仍保留可追溯。', entry: '新建 Loop 会话 → Idea' },
       { icon: '▶', title: 'Execute 迭代', summary: '每轮都是对完整目标的一次最佳尝试，依次进行 Prepare、Execute、Analysis；步骤可串行或并行。', entry: 'Loop 面板 → 开始本轮' },
       { icon: '✋', title: '人工接管', summary: 'LOOP 完全停止且没有待恢复的半截任务时，可切到普通会话亲自接管。人工对话、工具调用和操作步骤会保存为一轮 Manual LOOP，回答结束后可交还自动 LOOP。', entry: 'Loop Execute 操作区 → 人工接管', tips: '运行中不能切换；先暂停 Auto，等待本轮完成。' },

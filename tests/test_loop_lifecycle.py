@@ -433,6 +433,36 @@ class LoopLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.stage, STAGE_OUT)
         self.assertEqual(state.stop_reason, "达到最大 loop 约束")
 
+    def test_large_loop_budget_is_not_clamped_or_reduced_by_risk(self) -> None:
+        policy = LoopPolicy.from_dict({"maxLoops": 500})
+        state = LoopState(
+            session_id="loop-large-budget",
+            stage=STAGE_EXECUTE,
+            risk_coefficient=0.4,
+            policy=policy,
+        )
+
+        self.assertEqual(policy.max_loops, 500)
+        self.assertEqual(state.effective_max_loops(), 500)
+        self.assertEqual(state.to_dict()["effectiveMaxLoops"], 500)
+        restored = LoopState.from_dict(state.to_dict())
+        self.assertEqual(restored.policy.max_loops, 500)
+        self.assertEqual(restored.effective_max_loops(), 500)
+
+    def test_large_loop_budget_stops_at_configured_value_not_legacy_cap(self) -> None:
+        state = LoopState(
+            session_id="loop-large-budget-stop",
+            stage=STAGE_EXECUTE,
+            risk_coefficient=0.0,
+            loops=[LoopRecord(seq=index, round=1, error="failed") for index in range(1, 500)],
+            policy=LoopPolicy(max_loops=500),
+        )
+        bridge = BridgeWS.__new__(BridgeWS)
+
+        self.assertEqual(bridge._loop_should_stop(state), (False, ""))
+        state.loops.append(LoopRecord(seq=500, round=1, error="failed"))
+        self.assertEqual(bridge._loop_should_stop(state), (True, "达到最大 loop 约束"))
+
     async def test_stalled_step_retries_with_fresh_context_and_keeps_artifacts(self) -> None:
         sid = "loop-step-auto-recovery"
         step = LoopStep(index=4, desc="run focused tests")

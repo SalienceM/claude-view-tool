@@ -428,7 +428,7 @@ class LoopPolicy:
     """Loop 的策略与心智（可在建会话时编辑、运行时实时查看/调整）。"""
     deliverable_score: float = DELIVERABLE_SCORE   # 可交付门槛
     outputtable_score: float = OUTPUTTABLE_SCORE   # 可输出门槛
-    max_loops: int = 8                             # 基础最大 loop 约束
+    max_loops: int = 8                             # 用户指定的最大 loop 数（不设产品硬上限）
     risk_threshold: float = 0.85                   # 风险止损阈值（≥ 即收口）
     step_stall_seconds: int = 300                  # execute 单步多久无任何模型/工具事件即判定疑似卡住
     step_max_attempts: int = 2                     # 卡住或空响应时，当前步最多自动尝试次数
@@ -505,7 +505,9 @@ class LoopPolicy:
             ml = int(d.get("maxLoops", 8))
         except (TypeError, ValueError):
             ml = 8
-        ml = max(1, min(50, ml))
+        # 最大 Loop 数由用户自己决定。这里只保证它是正整数，不再施加
+        # 产品级硬上限；否则前端填写 500 会在持久化时静默变成 50。
+        ml = max(1, ml)
         rt = max(0.1, min(1.0, _f("riskThreshold", 0.85)))
         try:
             stall = int(d.get("stepStallSeconds", 300))
@@ -629,8 +631,8 @@ class LoopState:
         return done[-1].analysis.score if done else 0.0
 
     def effective_max_loops(self) -> int:
-        """风险越高，允许的 loop 上限越低（避免无谓 loop）。"""
-        return max(1, round(self.policy.max_loops * (1.0 - 0.5 * self.risk_coefficient)))
+        """返回用户指定的本轮次数预算，不再根据风险系数暗中折减。"""
+        return max(1, self.policy.max_loops)
 
     def to_dict(self) -> dict:
         return {
