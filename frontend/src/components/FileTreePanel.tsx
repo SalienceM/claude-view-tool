@@ -42,6 +42,8 @@ import {
 } from '../utils/fileFocus';
 import { rankFileSearchPaths } from '../utils/fileSearch';
 import { buildFileAttentionContext, type AttentionContext } from '../utils/attentionContext';
+import { fileTransfers, type TransferProgress } from '../utils/fileTransfers';
+import { buildLocalManifestTree } from '../utils/localFileTree';
 
 const CodeEditor = lazy(() => import('./CodeEditor'));
 const PdfPreview = lazy(() => import('./PdfPreview'));
@@ -139,32 +141,6 @@ function freshnessTooltip(freshness: SyncFreshness): string {
 }
 
 /** 把本机完整文件清单一次性索引成逐级目录树，避免每次展开都全表扫描。 */
-function buildLocalManifestTree(manifest: Manifest | null): Record<string, TNode[]> {
-  const levels = new Map<string, Map<string, TNode>>();
-  if (!manifest) return {};
-  for (const [path, meta] of Object.entries(manifest)) {
-    const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
-    for (let i = 0; i < parts.length; i++) {
-      const parent = parts.slice(0, i).join('/');
-      const childRel = parts.slice(0, i + 1).join('/');
-      const isDir = i < parts.length - 1;
-      let level = levels.get(parent);
-      if (!level) { level = new Map(); levels.set(parent, level); }
-      level.set(childRel, {
-        name: parts[i], rel: childRel, isDir,
-        size: isDir ? 0 : meta.size,
-        local: true, remote: false,
-      });
-    }
-  }
-  const tree: Record<string, TNode[]> = {};
-  for (const [parent, nodes] of levels) {
-    tree[parent] = [...nodes.values()].sort((a, b) => (
-      a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name)
-    ));
-  }
-  return tree;
-}
 
 // ── Git 状态角标（TortoiseGit 风格）──
 const GIT_STATUS_COLOR: Record<GitFileStatusType, string> = {
@@ -335,18 +311,6 @@ interface PreviewState {
   loadingText?: string; structured?: StructuredPreviewPayload; error?: string;
 }
 
-interface TransferProgress {
-  direction: 'pull' | 'push';
-  rel: string;
-  fileIndex: number;
-  fileCount: number;
-  fileBytes: number;
-  fileSize: number;
-  doneBytes: number;
-  totalBytes: number;
-  activeCount: number;
-  startedAt: number;
-}
 
 interface FileContextMenu {
   x: number;
@@ -389,7 +353,11 @@ const SearchHighlightedText: React.FC<{ text: string; query: string }> = ({ text
   ))}</>;
 };
 
-export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey, execLabel, execMode, backendId, focusRequest, onAttentionChange }) => {
+export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey, execLabel, execMode, backendId, focusRequest: externalFocusRequest, onAttentionChange }) => {
+  const [treeFocus, setTreeFocus] = useState<{ external: Props['focusRequest']; request: FileFocusRequest } | null>(null);
+  const focusRequest = treeFocus && treeFocus.external === externalFocusRequest
+    ? treeFocus.request : externalFocusRequest;
+  const treeFocusId = useRef(0);
   // execMode='local' 表示“在 Backend 所在机器执行”，不代表浏览器拥有那台
   // 机器的文件系统。只有 Tauri 本机执行时可直接视为同一端。
   const isRemote = execMode === 'relay' || !isTauri();
@@ -422,6 +390,10 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
   // 远端会话的本地副本(离线/比对/同步用)。本地会话不涉及。
   const [localFs, setLocalFs] = useState<LocalFs | null>(null);
   const [localManifest, setLocalManifest] = useState<Manifest | null>(null);
+  const [localScanning, setLocalScanning] = useState(false);
+  const localScanRef = useRef<AbortController | null>(null);
+  const [localTree, setLocalTree] = useState<Record<string, TNode[]>>({});
+  const [directoryLimits, setDirectoryLimits] = useState<Record<string, number>>({});
   const [remoteManifest, setRemoteManifest] = useState<Manifest | null>(null);  // 比对后才有(带哈希)
   const [baseline, setBaseline] = useState<Manifest>({});
   const [comparing, setComparing] = useState(false);
@@ -487,9 +459,9 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
   const [review, setReview] = useState<ProvOpenResult | null>(null);
   const [reviewAttention, setReviewAttention] = useState<AttentionContext | null>(null);
   const [reviewOpening, setReviewOpening] = useState(false);
-  const [transfer, setTransfer] = useState<TransferProgress | null>(null);
-  const transferBusyRef = useRef(false);
-  const transferAbortRef = useRef(false);
+  const transferKey = JSON.stringify([execKey || 'home', workingDir.replace(/\\/g, '/').replace(/\/$/, '')]);
+  const transferJobs = React.useSyncExternalStore(fileTransfers.subscribe, fileTransfers.getSnapshot);
+  const transfer = transferJobs.find(job => job.workspace === transferKey && job.status === 'running')?.progress || null;
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
 
   // 把“用户此刻正在看的文件”提升到 App 的全局注意力层。二进制/Base64 会在
@@ -1028,15 +1000,36 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
 
   // 远端会话：按 session 恢复本机目录，避免不同远端 session 错用同一个本地目录。
   const scanLocal = useCallback(async (fs: LocalFs | null) => {
+    localScanRef.current?.abort();
     if (!fs) { setLocalManifest(null); return; }
-    try { setLocalManifest(await fs.scan([], includeGitMetadata)); } catch { setLocalManifest({}); }
+    const controller = new AbortController();
+    localScanRef.current = controller;
+    setLocalScanning(true);
+    setRemoteManifest(null);
+    try {
+      const manifest = await fs.scan([], includeGitMetadata, { hash: false, signal: controller.signal });
+      if (!controller.signal.aborted) setLocalManifest(manifest);
+    } catch {
+      if (!controller.signal.aborted) setLocalManifest({});
+    } finally {
+      if (!controller.signal.aborted) setLocalScanning(false);
+    }
   }, [includeGitMetadata]);
+  useEffect(() => () => { localScanRef.current?.abort(); }, []);
   const refreshAll = useCallback(async () => {
     await Promise.all([
       reloadAll(),
       localFs ? scanLocal(localFs) : Promise.resolve(),
     ]);
   }, [reloadAll, localFs, scanLocal]);
+  useEffect(() => {
+    let wasRunning = !!fileTransfers.active(transferKey);
+    return fileTransfers.subscribe(() => {
+      const running = !!fileTransfers.active(transferKey);
+      if (wasRunning && !running) void refreshAll();
+      wasRunning = running;
+    });
+  }, [transferKey, refreshAll]);
   useEffect(() => {
     if (!isRemote) {
       setLocalFs(null);
@@ -1048,16 +1041,12 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
     setLocalManifest(null);
     setRemoteManifest(null);
     restoreLocalDir(localBindingKey).then(async (fs) => {
-      if (!fs) return;
-      let manifest: Manifest = {};
-      try { manifest = await fs.scan([], includeGitMetadata); } catch { /* 保留空清单 */ }
-      if (!cancelled) {
-        setLocalFs(fs);
-        setLocalManifest(manifest);
-      }
+      if (!fs || cancelled) return;
+      setLocalFs(fs);
+      await scanLocal(fs);
     }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [isRemote, localBindingKey, includeGitMetadata]);
+    return () => { cancelled = true; localScanRef.current?.abort(); };
+  }, [isRemote, localBindingKey, includeGitMetadata, scanLocal]);
   const baselineLocalId = useMemo(() => {
     if (!localFs) return '';
     return includeGitMetadata ? `${localFs.id()}::with-git` : localFs.id();
@@ -1067,7 +1056,13 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
     else setBaseline({});
   }, [baselineLocalId, workingDir]);
 
-  const localTree = useMemo(() => buildLocalManifestTree(localManifest), [localManifest]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void buildLocalManifestTree(localManifest, controller.signal).then(tree => {
+      if (!controller.signal.aborted) setLocalTree(tree);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [localManifest]);
   const remoteManifestDirs = useMemo(() => {
     const dirs = new Set<string>();
     for (const rel of Object.keys(remoteManifest || {})) {
@@ -1168,6 +1163,8 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
 
   // 聊天气泡中的文件链接 → 自动逐层加载、展开、选中并滚动到目标。
   // 请求同时绑定 Session 和 workingDir，避免分屏/切换节点时定位到同名目录。
+  const focusDataRef = useRef({ loadChildren, localTree });
+  focusDataRef.current = { loadChildren, localTree };
   useEffect(() => {
     if (!focusRequest
       || focusRequest.requestId === processedFocusRequestRef.current
@@ -1194,9 +1191,9 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
       for (let i = 0; i < parts.length; i++) {
         const parent = parts.slice(0, i).join('/');
         const expected = parts.slice(0, i + 1).join('/');
-        const loaded = await loadChildren(parent);
+        const loaded = await focusDataRef.current.loadChildren(parent);
         if (cancelled) return;
-        const candidates = [...loaded, ...(localTree[parent] || [])];
+        const candidates = [...loaded, ...(focusDataRef.current.localTree[parent] || [])];
         const node = candidates.find((item) => item.rel.replace(/\\/g, '/') === expected);
         if (!node || (i < parts.length - 1 && !node.isDir)) {
           setMsg({ kind: 'err', text: `无法在当前工作目录中定位：${relativePath}` });
@@ -1230,7 +1227,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
       cancelled = true;
       if (revealFrame) cancelAnimationFrame(revealFrame);
     };
-  }, [focusRequest, sessionId, workingDir, isRemote, sessionOnline, localFs, localTree, loadChildren]);
+  }, [focusRequest, sessionId, workingDir, isRemote, sessionOnline, localFs]);
 
   useEffect(() => () => {
     if (focusFlashTimerRef.current) clearTimeout(focusFlashTimerRef.current);
@@ -1330,6 +1327,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
     if (!L) return 'cloud';
     const R = remoteManifest?.[node.rel];
     if (R) {
+      if (!L.hash || !R.hash) return 'local';
       if (L.hash === R.hash) return 'synced';
       const B = baseline[node.rel]?.hash;
       return (B && L.hash !== B && R.hash !== B) ? 'conflict' : 'differs';
@@ -1343,7 +1341,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
     const remote: FileMeta | undefined = remoteManifest?.[node.rel];
     // 尚未完整比对时，目录列表仍足以确认当前层的远端独有文件，并可直接展示
     // 执行端提供的最后修改时间；两端都有的文件仍等待 hash 比对后再下结论。
-    if (!remoteManifest) {
+    if (!remoteManifest || (local && !local.hash) || (remote && !remote.hash)) {
       if (node.remote && !node.local) {
         return { kind: 'remote-only', basis: 'presence', remoteMtime: node.remoteMtime };
       }
@@ -1424,6 +1422,8 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
   }, []);
 
   const runCompare = useCallback(async () => {
+    localScanRef.current?.abort();
+    setLocalScanning(false);
     if (!workingDir || !localFs) return;
     if (!sessionOnline) {
       setMsg({ kind: 'err', text: '当前离线；本地修改已保留，恢复连接后再比对或上传' });
@@ -1446,13 +1446,46 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
 
   const bumpBaseline = useCallback((rels: string[], src: Manifest | null) => {
     if (!localFs || !workingDir || !src || !baselineLocalId) return;
-    setBaseline((prev) => {
-      const next = { ...prev };
-      for (const rel of rels) if (src[rel]) next[rel] = src[rel];
-      saveBaseline(baselineLocalId, workingDir, next);
-      return next;
-    });
+    const next = { ...loadBaseline(baselineLocalId, workingDir) };
+    for (const rel of rels) if (src[rel]) next[rel] = src[rel];
+    saveBaseline(baselineLocalId, workingDir, next);
+    setBaseline(next);
   }, [localFs, workingDir, baselineLocalId]);
+
+  const deleteRemoteEntry = useCallback(async (node: TNode) => {
+    setContextMenu(null);
+    if (!node.remote || !node.rel || !workingDir || !sessionOnline || fileTransfers.active(transferKey)) return;
+    const kind = node.isDir ? '目录及其全部内容（含隐藏文件）' : '文件';
+    if (!window.confirm([
+      '永久删除执行端' + kind + '？',
+      '执行节点：' + (execLabel || execKey || '当前执行端'),
+      '工作目录：' + workingDir,
+      '目标：' + node.rel,
+      '',
+      '不可恢复，不经过回收站。本地副本不会删除；之后重新上传可能把它传回来。',
+    ].join('\n'))) return;
+    const job = fileTransfers.start(transferKey, (execLabel || execKey || '执行端') + ' · ' + (sessionId || workingDir), 'delete', node.rel);
+    if (!job) return;
+    try {
+      const result = await api.syncDeleteEntry(workingDir, node.rel, node.isDir, execKey);
+      if (result.status !== 'ok') throw new Error(result.message || '删除失败');
+      const contains = (path: string) => path === node.rel || path.startsWith(node.rel + '/');
+      setRemoteManifest(current => current ? Object.fromEntries(Object.entries(current).filter(([path]) => !contains(path))) : null);
+      setChildren(current => Object.fromEntries(Object.entries(current)
+        .filter(([path]) => !contains(path))
+        .map(([path, entries]) => [path, entries.filter(entry => !contains(entry.rel))])));
+      setSelected(current => current && contains(current) ? null : current);
+      setPreview(current => current && current.source === 'remote' && contains(current.rel) ? null : current);
+      setSearchResults(current => current.filter(entry => !contains(entry.rel)));
+      const message = '已删除执行端：' + node.rel + '；本地副本保留，请重新比对后决定是否同步。';
+      setMsg({ kind: 'ok', text: message });
+      fileTransfers.finish(job, message);
+    } catch (error: any) {
+      const message = '删除失败或结果未确认：' + (error?.message || String(error)) + '。请刷新目录核实。';
+      setMsg({ kind: 'err', text: message });
+      fileTransfers.finish(job, message, true);
+    }
+  }, [workingDir, execKey, execLabel, sessionId, sessionOnline, transferKey]);
 
   // 收集某节点下所有文件 rel(比对模式用远端清单;否则递归 listDirectory)
   const collectFiles = useCallback(async (node: TNode): Promise<string[]> => {
@@ -1484,10 +1517,18 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
   const pull = useCallback(async (node: TNode) => {
     if (!localFs || !workingDir) { setMsg({ kind: 'err', text: '请先选择「本地副本目录」' }); return; }
     if (!sessionOnline) { setMsg({ kind: 'err', text: '执行端当前离线，无法下载新文件；已下载副本仍可使用' }); return; }
-    if (transfer || transferBusyRef.current) return;
-    transferBusyRef.current = true;
+    const job = fileTransfers.start(transferKey, (execLabel || execKey || '执行端') + ' · ' + (sessionId || workingDir), 'pull', node.rel);
+    if (!job) return;
+    const transferAbortRef = job.abort;
+    let outcome = '';
+    let failed = false;
+    const report = (message: { kind: 'ok' | 'err'; text: string }) => {
+      outcome = message.text;
+      failed = message.kind === 'err';
+      setMsg(message);
+    };
+    const setTransfer = (progress: TransferProgress) => fileTransfers.progress(job, progress);
     setMsg(null);
-    transferAbortRef.current = false;
     try {
       let rels: string[];
       const sizes: Record<string, number> = {};
@@ -1582,6 +1623,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
               offset += chunkBytes;
               publish(rel, index, offset, batch.length);
             }
+            if (transferAbortRef.current) throw new Error('__TRANSFER_CANCELLED__');
             await localFs.writeFinish(rel, id, size);
             publish(rel, index, size, batch.length);
             ok.push(rel);
@@ -1603,21 +1645,29 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
 
       paintProgress(true);
       applyCompleted();
-      setMsg({ kind: 'ok', text: `✓ 已下载 ${ok.length}/${rels.length} 个文件到本地` });
+      report({ kind: 'ok', text: `✓ 已下载 ${ok.length}/${rels.length} 个文件到本地` });
     } catch (e: any) {
-      setMsg({ kind: 'err', text: e?.message === '__TRANSFER_CANCELLED__' ? '下载已取消，未完成文件不会覆盖本地原文件' : `下载失败：${e?.message ?? e}` });
+      report({ kind: 'err', text: e?.message === '__TRANSFER_CANCELLED__' ? '下载已取消，未完成文件不会覆盖本地原文件' : `下载失败：${e?.message ?? e}` });
     }
-    finally { transferBusyRef.current = false; setTransfer(null); transferAbortRef.current = false; }
-  }, [localFs, workingDir, execKey, collectFiles, bumpBaseline, remoteManifest, transfer, sessionOnline, includeGitMetadata]);
+    finally { fileTransfers.finish(job, outcome, failed); }
+  }, [localFs, workingDir, execKey, collectFiles, bumpBaseline, remoteManifest, sessionOnline, includeGitMetadata, transferKey, execLabel, sessionId]);
 
   // ⬆ 上传本地改动(本地→云端)
   const push = useCallback(async (node: TNode) => {
     if (!localFs || !workingDir || !localManifest) return;
     if (!sessionOnline) { setMsg({ kind: 'err', text: '当前离线；修改已保留在平板，恢复连接后再上传' }); return; }
-    if (transfer || transferBusyRef.current) return;
-    transferBusyRef.current = true;
+    const job = fileTransfers.start(transferKey, (execLabel || execKey || '执行端') + ' · ' + (sessionId || workingDir), 'push', node.rel);
+    if (!job) return;
+    const transferAbortRef = job.abort;
+    let outcome = '';
+    let failed = false;
+    const report = (message: { kind: 'ok' | 'err'; text: string }) => {
+      outcome = message.text;
+      failed = message.kind === 'err';
+      setMsg(message);
+    };
+    const setTransfer = (progress: TransferProgress) => fileTransfers.progress(job, progress);
     setMsg(null);
-    transferAbortRef.current = false;
     try {
       const prefix = node.rel ? `${node.rel}/` : '';
       const rels = node.isDir ? Object.keys(localManifest).filter((r) => !node.rel || r === node.rel || r.startsWith(prefix)) : [node.rel];
@@ -1691,6 +1741,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
               offset += chunkBytes;
               publish(rel, index, offset, batch.length);
             }
+            if (transferAbortRef.current) throw new Error('__TRANSFER_CANCELLED__');
             const finish = await api.syncWriteFinish(workingDir, rel, id, size, execKey);
             if (finish.status !== 'ok') throw new Error(finish.message || `上传完成校验失败：${rel}`);
             publish(rel, index, size, batch.length);
@@ -1715,12 +1766,12 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
       await applyUploaded();
       // 合并树会依据上面的 remoteManifest 增量立刻更新，无需在传输完成后
       // 再对所有已展开目录发一轮 listDirectory RPC。
-      setMsg({ kind: 'ok', text: `✓ 已上传 ${ok.length}/${rels.length} 个文件到远端` });
+      report({ kind: 'ok', text: `✓ 已上传 ${ok.length}/${rels.length} 个文件到远端` });
     } catch (e: any) {
-      setMsg({ kind: 'err', text: e?.message === '__TRANSFER_CANCELLED__' ? '上传已取消，未完成文件不会覆盖远端原文件' : `上传失败：${e?.message ?? e}` });
+      report({ kind: 'err', text: e?.message === '__TRANSFER_CANCELLED__' ? '上传已取消，未完成文件不会覆盖远端原文件' : `上传失败：${e?.message ?? e}` });
     }
-    finally { transferBusyRef.current = false; setTransfer(null); transferAbortRef.current = false; }
-  }, [localFs, workingDir, execKey, localManifest, bumpBaseline, transfer, expanded, loadChildren, sessionOnline]);
+    finally { fileTransfers.finish(job, outcome, failed); }
+  }, [localFs, workingDir, execKey, localManifest, bumpBaseline, expanded, loadChildren, sessionOnline, transferKey, execLabel, sessionId]);
 
   /** 为浏览器预览分块取回二进制，绕开旧的 32 MiB 整文件 WS 帧并实时反馈读取进度。 */
   const readPreviewBytes = useCallback(async (
@@ -1960,11 +2011,10 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
       if (event.key !== 'Escape') return;
       event.preventDefault();
       if (previewMaximized) setPreviewMaximized(false);
-      else closePreview();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [preview, previewMaximized, closePreview]);
+  }, [preview, previewMaximized]);
 
   // ── 渲染 ──
   const fileIcon = (n: TNode, st: FStatus | null): string => {
@@ -1990,7 +2040,14 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
     if (nodes.length === 0 && depth === 0) {
       return <Empty text={onlyDifferent ? '没有内容不同的文件' : '（空目录）'} />;
     }
-    return nodes.map((n) => {
+    const limit = directoryLimits[rel] || 200;
+    const visibleNodes = nodes.slice(0, limit);
+    const focusPath = focusRequest && focusRequest.sessionId === sessionId
+      ? normalizeRelativeFilePath(focusRequest.relativePath) : '';
+    const focusedNode = focusPath ? nodes.find(node => node.rel === focusPath
+      || (node.isDir && focusPath.startsWith(node.rel + '/'))) : undefined;
+    if (focusedNode && !visibleNodes.includes(focusedNode)) visibleNodes.push(focusedNode);
+    return <>{visibleNodes.map((n) => {
       const open = !!expanded[n.rel];
       const gitTransferBlocked = isGitMetadataPath(n.rel) && !includeGitMetadata;
       const st = gitTransferBlocked ? null : statusOf(n);
@@ -2088,6 +2145,11 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
               }}>{gitBadge.letter}</span>
             )}
             {/* 操作(hover) */}
+            {n.remote && !isGitMetadataPath(n.rel) && (
+              <button className="ftp-act" style={{ ...actBtnStyle, color: '#ef4444' }} disabled={!sessionOnline || !!transfer}
+                title={n.isDir ? '删除执行端目录及全部内容（保留本地副本）' : '删除执行端文件（保留本地副本）'}
+                onClick={event => { event.stopPropagation(); void deleteRemoteEntry(n); }}>🗑</button>
+            )}
             {!n.isDir && !n.typeConflict && (
               <button className="ftp-act" style={actBtnStyle} title="预览 / 编辑" onClick={(e) => { e.stopPropagation(); openPreview(n); }}>👁</button>
             )}
@@ -2101,11 +2163,14 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
           {n.isDir && open && renderDir(n.rel, depth + 1)}
         </div>
       );
-    });
+    })}{nodes.length > limit && <button style={{ ...actBtnStyle, width: 'auto', padding: '6px 12px', height: 'auto' }}
+      onClick={() => setDirectoryLimits(current => ({ ...current, [rel]: limit + 200 }))}
+      title="分批展开，避免大量文件阻塞界面">显示更多（剩余 {nodes.length - limit} 项）</button>}</>;
   };
 
   return (
     <div style={wrapStyle}>
+      {localScanning && <div role="status" style={{ padding: '6px 12px', fontSize: 12 }}>正在后台读取本地目录…可继续切换会话</div>}
       <style>{`
         @keyframes ftp-focus-pulse {
           0%, 100% { box-shadow: inset 2px 0 0 var(--theme-accent, #0969da); }
@@ -2377,16 +2442,19 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
         return (
           <div style={transferBoxStyle}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-              <span>{transfer.direction === 'pull' ? '⬇' : '⬆'}</span>
+              <span>{transfer.direction === 'delete' ? '🗑' : transfer.direction === 'pull' ? '⬇' : '⬆'}</span>
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={transfer.rel}>
-                {transfer.direction === 'pull' ? '下载' : '上传'} {transfer.fileIndex}/{transfer.fileCount} · {transfer.rel}
+                {transfer.direction === 'delete' ? '删除执行端' : transfer.direction === 'pull' ? '下载' : '上传'} {transfer.direction !== 'delete' && transfer.fileIndex + '/' + transfer.fileCount} · {transfer.rel}
               </span>
               <span style={{ color: 'var(--theme-text-muted)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                 {formatBytes(transfer.fileBytes)} / {formatBytes(transfer.fileSize)}
                 {transfer.doneBytes > 0 ? ` · ${formatBytes(bytesPerSecond)}/s` : ''}
                 {transfer.activeCount > 1 ? ` · ×${transfer.activeCount}` : ''}
               </span>
-              <button style={transferCancelStyle} onClick={() => { transferAbortRef.current = true; }}>取消</button>
+              <button style={transferCancelStyle} disabled={transfer.direction === 'delete'} onClick={() => {
+                const job = fileTransfers.active(transferKey);
+                if (job) fileTransfers.cancel(job);
+              }}>取消</button>
             </div>
             <div style={transferTrackStyle} title={`当前文件 ${current.toFixed(1)}% · 总进度 ${overall.toFixed(1)}%`}>
               <div style={{ ...transferFillStyle, width: `${overall}%` }} />
@@ -2537,6 +2605,19 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
           >
             {!n.isDir && !n.typeConflict && (
               <button style={contextItemStyle} onClick={() => { setContextMenu(null); openPreview(n); }}>👁️ 预览 / 编辑</button>
+            )}
+            <button style={contextItemStyle} disabled={!sessionId} onClick={() => {
+              if (!sessionId) return;
+              setContextMenu(null);
+              setTreeFocus({ external: externalFocusRequest, request: {
+                requestId: --treeFocusId.current, sessionId, workingDir, relativePath: n.rel,
+              } });
+            }}>🎯 在文件树中定位</button>
+            {n.remote && !isGitMetadataPath(n.rel) && (
+              <button style={{ ...contextItemStyle, color: '#ef4444', ...((!sessionOnline || transfer) ? contextDisabledStyle : {}) }}
+                disabled={!sessionOnline || !!transfer} onClick={() => void deleteRemoteEntry(n)}>
+                🗑 {n.isDir ? '删除执行端目录及全部内容' : '删除执行端文件'}（保留本地副本）
+              </button>
             )}
             {n.remote && (
               <button style={contextItemStyle} onClick={() => revealNode(n, 'remote')}>
@@ -2874,7 +2955,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
 
       {preview && (
         <AppModalPortal>
-          <div style={pvOverlay} onClick={closePreview}>
+          <div style={pvOverlay}>
             <div style={{ ...pvBox, ...(previewMaximized ? pvBoxMaximized : {}) }} onClick={(e) => e.stopPropagation()}>
             <div style={pvHeader}>
               <span style={{ fontSize: 13 }}>{preview.isImage ? '🖼️' : preview.renderer === 'pdf' ? '📕' : preview.renderer === 'docx' ? '📘' : preview.renderer === 'drawio' ? '🧩' : preview.structured ? '📊' : editing ? '✏️' : '📄'}</span>
@@ -2938,7 +3019,7 @@ export const FileTreePanel: React.FC<Props> = ({ sessionId, workingDir, execKey,
               <button style={hdrBtnStyle} onClick={() => setPreviewMaximized((value) => !value)} title={previewMaximized ? '退出最大化（Esc）' : '最大化预览'}>
                 {previewMaximized ? '🗗 还原' : '⛶ 最大化'}
               </button>
-              <button style={hdrBtnStyle} onClick={closePreview}>✕</button>
+              <button style={hdrBtnStyle} onClick={closePreview} title="关闭预览" aria-label="关闭预览">✕</button>
             </div>
             <div style={pvBody}>
               {preview.loading ? (

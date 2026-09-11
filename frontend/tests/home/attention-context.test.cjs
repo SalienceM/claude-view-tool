@@ -3,10 +3,32 @@ const assert = require('node:assert/strict');
 
 const {
   ATTENTION_CONTENT_LIMIT,
+  bindAttention,
   buildFileAttentionContext,
   buildReviewAttentionContext,
   serializeAttentionContent,
 } = require('../../.home-test-dist/utils/attentionContext.js');
+
+test('explicit attention binding preserves target session, executor and snapshot across focus changes', () => {
+  const session = { id: 'A', execKey: 'node-a', sessionType: 'loop', workingDir: '/repo/a' };
+  const attention = { key: 'file:a', kind: 'file', label: 'A file', sessionId: 'A', execKey: 'node-a',
+    content: 'original text', imageAttachments: [{ id: 'image-a', base64: 'original', mime_type: 'image/png', size: 1 }] };
+  const backends = [{ id: 'backend-a' }];
+  const bound = bindAttention(session, attention, backends);
+  session.id = 'B';
+  session.execKey = 'node-b';
+  attention.key = 'file:b';
+  attention.content = 'new text';
+  attention.imageAttachments[0].base64 = 'changed';
+  backends.push({ id: 'backend-b' });
+  assert.equal(bound.session.id, 'A');
+  assert.equal(bound.session.execKey, 'node-a');
+  assert.equal(bound.session.sessionType, 'loop');
+  assert.equal(bound.attention.key, 'file:a');
+  assert.equal(bound.attention.content, 'original text');
+  assert.equal(bound.attention.imageAttachments[0].base64, 'original');
+  assert.equal(bound.backends.length, 1);
+});
 
 test('structured attention strips binary payloads', () => {
   const text = serializeAttentionContent({

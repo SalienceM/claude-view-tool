@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, SkillInfo } from '../api';
 import { SkillMarketDialog } from './SkillMarketDialog';
+import { SkillRuntimeDialog } from './SkillRuntimeDialog';
 
 // 注入卡片悬停样式
 if (typeof document !== 'undefined' && !document.getElementById('repo-panel-css')) {
@@ -244,6 +245,7 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
   const [installResult, setInstallResult] = useState<{ name: string; version: string; count?: number; format?: string } | null>(null);
   const [installError, setInstallError] = useState('');
   const [showSkillMarket, setShowSkillMarket] = useState(false);
+  const [runtimeNames, setRuntimeNames] = useState<string[]>([]);
   // Secrets 配置
   type SecretsField = { key: string; label: string; type: string; required?: boolean; placeholder?: string };
   const [secretsSkill, setSecretsSkill] = useState<string | null>(null);
@@ -398,6 +400,7 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
         await refresh();
         const m = res.manifest;
         const installedSkills = Array.isArray((res as any).skills) ? (res as any).skills : [];
+        setRuntimeNames(installedSkills.length ? installedSkills.map((s: any) => s.name || s.id).filter(Boolean) : [m?.name || m?.id].filter(Boolean));
         setInstallResult({
           name: installedSkills.length > 1
             ? `${installedSkills[0]?.name || installedSkills[0]?.id || 'Skill'} 等`
@@ -613,6 +616,8 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
                   {parseSkillBackend(s.content || '') ? '🔗' : s.type === 'python-script' || s.hasCallPy ? '🐍' : '⚡'}
                 </div>
                 <div style={cardNameStyle}>{s.name}</div>
+                <button style={{ ...addBtnStyle, width: 'auto', height: 'auto', minHeight: 28, padding: '4px 6px', whiteSpace: 'nowrap', fontSize: 11, marginTop: 5 }} title="检查此技能在执行节点的资源、依赖与配置"
+                  onClick={e => { e.stopPropagation(); setRuntimeNames([s.name]); }}>运行准备 / 状态</button>
                 <div style={{ position: 'absolute', top: 4, left: 4, display: 'flex', gap: 2 }}>
                   {s.manifest && (
                     <span title={`插件包安装 v${s.manifest.version || '?'}`}
@@ -797,7 +802,8 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
         <div style={deleteOverlayStyle} onClick={() => setInstallResult(null)}>
           <div style={{ ...deleteDialogStyle, width: 320, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: 36, marginBottom: 8 }}>📦</div>
-            <h3 style={{ margin: '0 0 6px', fontSize: 15, color: 'var(--theme-text)' }}>安装成功</h3>
+            <h3 style={{ margin: '0 0 6px', fontSize: 15, color: 'var(--theme-text)' }}>资源已导入</h3>
+            <p style={{ fontSize: 11, color: 'var(--theme-text-muted)' }}>运行环境是否就绪，请查看“运行准备 / 状态”。</p>
             <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--theme-text-muted)' }}>
               <strong style={{ color: 'var(--theme-text)' }}>{installResult.name}</strong>
               {installResult.version && (
@@ -832,8 +838,9 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
       <SkillMarketDialog
         open={showSkillMarket}
         onClose={() => setShowSkillMarket(false)}
-        onInstalled={refresh}
+        onInstalled={async (name) => { await refresh(); if (name) { setShowSkillMarket(false); setRuntimeNames([name]); } }}
       />
+      {runtimeNames.length > 0 && <SkillRuntimeDialog key={runtimeNames.join('|')} names={runtimeNames} onClose={() => setRuntimeNames([])} />}
 
       {/* ── Secrets 配置对话框 ── */}
       {secretsSkill && secretsSchema && (

@@ -356,5 +356,102 @@ class QwenCodeCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("12 tests passed", result_delta.tool_call["output"])
 
 
+    async def _run_stream(self, messages, **kwargs):
+        import tempfile
+
+        for message in messages:
+            message.setdefault("session_id", "qwen-session")
+        query = _FakeQuery(messages)
+        deltas = []
+        with tempfile.TemporaryDirectory() as cwd, \
+             patch("qwen_code_sdk.query", return_value=query) as sdk_query, \
+             patch("src.backend.qwen_code_cli.cli_available", return_value=True), \
+             patch.object(self.backend, "_resolve_cli", return_value="qwen"):
+            result = await asyncio.wait_for(self.backend.send_message(
+                messages=[], content="hello", images=None,
+                session_id="session-1", message_id="message-1",
+                on_delta=deltas.append, working_dir=cwd, **kwargs,
+            ), timeout=2)
+        await asyncio.wait_for(query.finished.wait(), timeout=1)
+        self.assertNotIn("session-1", self.backend._active_queries)
+        self.assertEqual(sum(d.type == "done" for d in deltas), 1)
+        return deltas, sdk_query.call_args.args[1], result
+
+    async def test_questions_use_normal_chat_even_on_resume_and_yolo(self):
+        deltas, options, result = await self._run_stream([
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "要继续执行吗？"},
+            ]}},
+            {"type": "result", "subtype": "success", "session_id": "native-thread"},
+        ], agent_session_id="native-thread", skip_permissions=True)
+        self.assertIn("ask_user_question", options["exclude_tools"])
+        self.assertIn("end the turn", options["append_system_prompt"])
+        self.assertEqual(options["resume"], "native-thread")
+        for name in ("ask_user_question", "AskUserQuestion"):
+            decision = await options["can_use_tool"](name, {"questions": []}, {})
+            self.assertEqual(decision["behavior"], "deny")
+            self.assertIn("next chat turn", decision["message"])
+        self.assertEqual(result["agentSessionId"], "native-thread")
+        self.assertEqual("".join(d.text or "" for d in deltas if d.type == "text_delta"), "要继续执行吗？")
+
+    async def test_streamed_thinking_does_not_hide_completed_text_or_tool(self):
+        deltas, _, _ = await self._run_stream([
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "checking"}}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": "checking"},
+                {"type": "text", "text": "Testing now"},
+                {"type": "tool_use", "id": "t1", "name": "run_shell_command", "input": {"command": "pytest"}},
+            ]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "passed"},
+            ]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Finished. Anything else?"},
+            ]}},
+            {"type": "result", "subtype": "success"},
+        ])
+        self.assertEqual("".join(d.text or "" for d in deltas if d.type == "thinking"), "checking")
+        self.assertEqual("".join(d.text or "" for d in deltas if d.type == "text_delta"), "Testing nowFinished. Anything else?")
+        self.assertEqual([d.type for d in deltas if d.type in ("tool_start", "tool_result", "done")],
+                         ["tool_start", "tool_result", "done"])
+
+    async def test_completed_text_emits_only_missing_stream_suffix(self):
+        deltas, _, _ = await self._run_stream([
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hello"}}},
+            {"type": "stream_event", "event": {"type": "message_stop"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Hello, continue?"},
+            ]}},
+            {"type": "result", "subtype": "success"},
+        ])
+        self.assertEqual("".join(d.text or "" for d in deltas if d.type == "text_delta"), "Hello, continue?")
+        self.assertEqual(deltas[-1].type, "done")
+
+    async def test_message_stop_and_question_do_not_finish_a_running_tool(self):
+        deltas, _, _ = await self._run_stream([
+            {"type": "stream_event", "event": {"type": "message_start"}},
+            {"type": "stream_event", "event": {"type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "What failed?"}}},
+            {"type": "stream_event", "event": {"type": "content_block_start",
+                "content_block": {"type": "tool_use", "id": "t1", "name": "run_shell_command"}}},
+            {"type": "stream_event", "event": {"type": "message_stop"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "What failed?"},
+                {"type": "tool_use", "id": "t1", "name": "run_shell_command", "input": {}},
+            ]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "output"},
+            ]}},
+            {"type": "stream_event", "event": {"type": "message_start"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "All OK"}]}},
+            {"type": "result", "subtype": "success"},
+        ])
+        self.assertEqual([d.type for d in deltas if d.type in ("tool_start", "tool_result", "done")],
+                         ["tool_start", "tool_result", "done"])
+        self.assertEqual("".join(d.text or "" for d in deltas if d.type == "text_delta"), "What failed?All OK")
+
+
 if __name__ == "__main__":
     unittest.main()

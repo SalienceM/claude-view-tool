@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { api } from '../api';
+import { mergeSessionRouting } from '../utils/sessionRouting';
 import type { CurrentUserProfile, FollowUpCapabilities } from '../api';
 import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
@@ -164,9 +165,8 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   onRequestFileFocus,
 }) => {
   // ── pane 自己的 session 详情(workingDir / backendId / skip / sandbox) ──
-  const [activeSession, setActiveSession] = useState<any | null>(null);
+  const [activeSession, setActiveSession] = useState<any | null>(() => sessionId ? api.peekSessionMeta(sessionId) : null);
   const [nodeBackends, setNodeBackends] = useState<any[]>(backends);
-  const [loopControlMode, setLoopControlMode] = useState<'loop' | 'manual'>('loop');
   const [loopRunning, setLoopRunning] = useState(false);
   const [realtimeVoiceActive, setRealtimeVoiceActive] = useState(false);
   // 权限 state: 初值从 session 读,变化时持久化
@@ -188,64 +188,44 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   onFocusRef.current = onFocus;
   onRequestFileFocusRef.current = onRequestFileFocus;
 
-  // 加载 session 详情(切换 sessionId 时重新拉)
-  useEffect(() => {
+  useLayoutEffect(() => {
+    setActiveSession(sessionId ? api.peekSessionMeta(sessionId) : null);
     setLoopRunning(false);
-    if (!sessionId) {
-      setActiveSession(null);
-      return;
-    }
-    // 只拉 index 元数据：不解析消息正文，也不读取完整 LOOP stage。
-    let cancelled = false;
-    api.loadSessionMeta(sessionId).then((session) => {
-      if (cancelled) return;
-      if (session?.sessionType === 'loop') {
-        setLoopControlMode(session.loopControlMode === 'manual' ? 'manual' : 'loop');
-        setLoopRunning(session.loopRunning === true);
-      } else {
-        setLoopControlMode('loop');
-        setLoopRunning(false);
-      }
-      setActiveSession(session);
-      if (session?.skipPermissions !== undefined) {
-        setSkipPermissions(session.skipPermissions);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
   }, [sessionId]);
 
-  // 所有权首屏直接来自 Session index；这里只订阅后续变化，不再为判断 manual
-  // 拉取 1~10MB 的完整 LOOP stage（LoopPanel 自己按需加载摘要/详情）。
-  useEffect(() => {
-    if (!sessionId) {
-      setLoopControlMode('loop');
-      setLoopRunning(false);
-      return;
-    }
-    const unsubscribe = api.onLoopUpdated((state: any) => {
-      if (state?.sessionId === sessionId) {
-        setLoopControlMode(state.controlMode === 'manual' ? 'manual' : 'loop');
-        setLoopRunning(state.running === true);
-      }
-    });
-    return unsubscribe;
-  }, [sessionId]);
-
-  // Session 类型可以在 id 不变的情况下由普通会话转换为 LOOP。订阅权威摘要，
-  // 让当前 pane 立即从聊天界面切换到 LoopPanel，无需用户刷新或来回切换 Session。
   useEffect(() => {
     if (!sessionId) return;
-    return api.onSessionUpdated((data: any) => {
-      if (data?.sessionId !== sessionId || !data?.summary) return;
-      setActiveSession((current: any) => (
-        current?.id === sessionId ? { ...current, ...data.summary } : current
+    let cancelled = false;
+    let eventRevision = 0;
+    const unsubscribeLoop = api.onLoopUpdated((state: any) => {
+      if (state?.sessionId !== sessionId) return;
+      eventRevision++;
+      setActiveSession((current: any) => mergeSessionRouting(
+        current?.id === sessionId ? current : api.peekSessionMeta(sessionId),
+        {
+          id: sessionId, sessionType: 'loop',
+          loopControlMode: state.controlMode,
+        },
       ));
-      if (data.summary.sessionType === 'loop') {
-        setLoopControlMode(data.summary.loopControlMode === 'manual' ? 'manual' : 'loop');
-      }
+      if (typeof state.running === 'boolean') setLoopRunning(state.running);
     });
+    const unsubscribeSession = api.onSessionUpdated((data: any) => {
+      if (data?.sessionId !== sessionId || !data.summary) return;
+      eventRevision++;
+      setActiveSession((current: any) => mergeSessionRouting(
+        current?.id === sessionId ? current : api.peekSessionMeta(sessionId), data.summary,
+      ));
+    });
+    const requestRevision = eventRevision;
+    api.loadSessionMeta(sessionId).then((session) => {
+      if (cancelled || !session) return;
+      setActiveSession((current: any) => eventRevision === requestRevision
+        ? mergeSessionRouting(current?.id === sessionId ? current : null, session)
+        : mergeSessionRouting(session, current?.id === sessionId ? current : api.peekSessionMeta(sessionId)));
+      if (eventRevision === requestRevision) setLoopRunning(session.loopRunning === true);
+      if (session.skipPermissions !== undefined) setSkipPermissions(session.skipPermissions);
+    });
+    return () => { cancelled = true; unsubscribeLoop(); unsubscribeSession(); };
   }, [sessionId]);
 
   // Backend configuration belongs to the executor that owns the session.
@@ -268,10 +248,12 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   const activeBackendLabel = effectiveBackends.find((item) => item.id === activeBackendId)?.label
     || activeBackendId
     || '当前 Backend';
-  const sessionMetaReady = !!sessionId && activeSession?.id === sessionId;
+  const sessionMetaReady = !!sessionId && activeSession?.id === sessionId
+    && (activeSession.sessionType !== 'loop'
+      || activeSession.loopControlMode === 'manual' || activeSession.loopControlMode === 'loop');
   const automatedLoop = sessionMetaReady
     && activeSession?.sessionType === 'loop'
-    && loopControlMode !== 'manual';
+    && activeSession.loopControlMode === 'loop';
   const chatHydrationEnabled = sessionMetaReady && !automatedLoop;
 
   const handleFocusLinkedFile = useCallback((relativePath: string) => {
@@ -794,6 +776,11 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   // ★ Loop 会话：直接把 LoopPanel 作为这个 pane 的内容内嵌渲染（不是浮层，
   //   也没有自由聊天框）—— loop 的主线交互都在面板内；俺寻思由 App 顶层独立承载，
   //   避免「聊天框 vs 面板」双入口、以及聊天与 loop 主线共用 agent 上下文的污染。
+  if (!sessionMetaReady) {
+    return <div className="awu-chat-pane" style={paneRootStyle} onClick={onFocus}>
+      <div role="status" style={{ padding: 20, color: 'var(--theme-text-muted)' }}>正在恢复会话…</div>
+    </div>;
+  }
   if (automatedLoop) {
     return (
       <div

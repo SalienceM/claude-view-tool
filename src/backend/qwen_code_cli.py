@@ -547,6 +547,9 @@ class QwenCodeSdkBackend(ModelBackend):
             "permission_mode": permission_mode,
             "auth_type": auth_type,
             "include_partial_messages": True,  # Stream partial messages
+            # stream-json 的确认协议不传递 ask_user_question.answers；自动 allow
+            # 会产生空答案。改走正常文本问答，让 CLI 正常发出 terminal result。
+            "exclude_tools": ["ask_user_question"],
             "env": env_dict if env_dict else None,
         }
         if tools:
@@ -560,6 +563,15 @@ class QwenCodeSdkBackend(ModelBackend):
             options["append_system_prompt"] = constraints
             print(f"[QwenSdk] constraints injected via append_system_prompt ({len(constraints)} chars)",
                   file=sys.stderr, flush=True)
+
+        question_guidance = (
+            "When you need clarification or user confirmation, ask in your final text "
+            "response and end the turn. The user will reply in the next chat turn. "
+            "Do not use ask_user_question or a shell command to wait for user input."
+        )
+        options["append_system_prompt"] = "\n\n".join(filter(None, (
+            options.get("append_system_prompt"), question_guidance,
+        )))
 
         # Session resume
         if agent_session_id:
@@ -612,6 +624,9 @@ class QwenCodeSdkBackend(ModelBackend):
         # Permission callback
         async def _can_use_tool(tool_name: str, tool_input: dict, context) -> dict:
             """SDK permission callback. Returns PermissionAllowResult or PermissionDenyResult."""
+            # 兼容旧版 CLI/恢复的原生线程仍然请求此工具的情况；不得伪造用户答案。
+            if tool_name in {"ask_user_question", "AskUserQuestion"}:
+                return {"behavior": "deny", "message": question_guidance}
             # Sandbox validation
             if sandbox_enabled and cwd and tool_name in SANDBOX_TOOLS:
                 from .bridge_ws import validate_tool_sandbox
@@ -658,7 +673,8 @@ class QwenCodeSdkBackend(ModelBackend):
         # 仅在收到真正可展示的增量后，才跳过随后重复的 completed assistant。
         # message_start/message_stop 也是 stream_event，但本身没有内容；旧逻辑
         # 会因此误判并吞掉某些 provider 只在 completed 中返回的最终内容。
-        _saw_partial_content = False
+        _partial_content: dict[str, str] = {}
+        _partial_tools: set[str] = set()
         _query_started_at = time.monotonic()
         _first_event_at: Optional[float] = None
         _active_result: Any = None
@@ -699,24 +715,38 @@ class QwenCodeSdkBackend(ModelBackend):
                         # When include_partial_messages=True, Qwen also sends stream_event
                         # deltas for the same content; emitting both causes the final
                         # answer/thinking/tool transcript to appear twice in the UI.
-                        if _saw_partial_content:
-                            continue
                         msg_dict = dict(message)
                         msg_content = msg_dict.get("message", {}).get("content", [])
                         for block in msg_content:
                             btype = block.get("type", "")
                             if btype == "text":
                                 t = block.get("text", "")
+                                streamed = _partial_content.get("text", "")
+                                if streamed and t.startswith(streamed):
+                                    t = t[len(streamed):]
+                                    _partial_content["text"] = ""
+                                elif t and streamed.startswith(t):
+                                    _partial_content["text"] = streamed[len(t):]
+                                    t = ""
                                 if t:
                                     emit("text_delta", text=t)
                             elif btype == "thinking":
                                 t = block.get("thinking", "")
+                                streamed = _partial_content.get("thinking", "")
+                                if streamed and t.startswith(streamed):
+                                    t = t[len(streamed):]
+                                    _partial_content["thinking"] = ""
+                                elif t and streamed.startswith(t):
+                                    _partial_content["thinking"] = streamed[len(t):]
+                                    t = ""
                                 if t:
                                     emit("thinking", text=t)
                             elif btype == "tool_use":
                                 _tool_name = block.get("name", "")
                                 _tool_input = block.get("input", {})
                                 _tool_id = str(block.get("id", ""))
+                                if _tool_id in _partial_tools:
+                                    continue
                                 if _tool_id:
                                     _tool_names_by_id[_tool_id] = _display_tool_name(_tool_name)
                                 emit("tool_start", tool_call={
@@ -725,6 +755,8 @@ class QwenCodeSdkBackend(ModelBackend):
                                     "input": json.dumps(_tool_input, ensure_ascii=False),
                                     "status": "running",
                                 })
+                        _partial_content.clear()
+                        _partial_tools.clear()
 
                     elif is_sdk_user_message(message):
                         # Qwen 把工具执行结果作为 user/tool_result 消息返回。旧适配器
@@ -757,23 +789,25 @@ class QwenCodeSdkBackend(ModelBackend):
                         msg_dict = dict(message)
                         event = msg_dict.get("event", {})
                         etype = event.get("type", "")
+                        if etype == "message_start":
+                            _partial_content.clear()
+                            _partial_tools.clear()
                         if etype == "content_block_delta":
                             delta = event.get("delta", {})
                             dtype = delta.get("type", "")
                             if dtype == "text_delta":
                                 text = delta.get("text", "")
                                 if text:
-                                    _saw_partial_content = True
+                                    _partial_content["text"] = _partial_content.get("text", "") + text
                                     emit("text_delta", text=text)
                             elif dtype == "thinking_delta":
                                 thinking = delta.get("thinking", "")
                                 if thinking:
-                                    _saw_partial_content = True
+                                    _partial_content["thinking"] = _partial_content.get("thinking", "") + thinking
                                     emit("thinking", text=thinking)
                             elif dtype == "input_json_delta":
                                 partial_json = delta.get("partial_json", "")
                                 if partial_json:
-                                    _saw_partial_content = True
                                     emit("tool_input", tool_call={
                                         "inputDelta": partial_json,
                                     })
@@ -781,8 +815,8 @@ class QwenCodeSdkBackend(ModelBackend):
                         elif etype == "content_block_start":
                             block = event.get("content_block", {})
                             if block.get("type") == "tool_use":
-                                _saw_partial_content = True
                                 _tool_id = str(block.get("id", ""))
+                                _partial_tools.add(_tool_id)
                                 if _tool_id:
                                     _tool_names_by_id[_tool_id] = _display_tool_name(block.get("name", ""))
                                 emit("tool_start", tool_call={

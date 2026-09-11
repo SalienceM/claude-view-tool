@@ -959,72 +959,73 @@ fn scan_dir(
     cur: &Path,
     ignore: &[String],
     include_git: bool,
+    hash_files: bool,
     out: &mut HashMap<String, SyncFileInfo>,
 ) {
+    use std::io::Read;
     let entries = match std::fs::read_dir(cur) {
-        Ok(e) => e,
+        Ok(entries) => entries,
         Err(_) => return,
     };
     for entry in entries.flatten() {
-        let ft = match entry.file_type() {
-            Ok(f) => f,
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
             Err(_) => continue,
         };
-        if ft.is_symlink() {
-            continue;
-        }
+        if file_type.is_symlink() { continue; }
         let path = entry.path();
         let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
         };
-        if sync_is_ignored(&rel, ignore, include_git) {
-            continue;
-        }
-        if ft.is_dir() {
-            scan_dir(root, &path, ignore, include_git, out);
-        } else if ft.is_file() {
-            if let Ok(data) = std::fs::read(&path) {
+        if sync_is_ignored(&rel, ignore, include_git) { continue; }
+        if file_type.is_dir() {
+            scan_dir(root, &path, ignore, include_git, hash_files, out);
+        } else if file_type.is_file() {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            let hash = if hash_files {
+                let mut file = match std::fs::File::open(&path) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
                 let mut hasher = Sha256::new();
-                hasher.update(&data);
-                let mtime = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis() as u64);
-                out.insert(
-                    rel,
-                    SyncFileInfo {
-                        hash: hex_encode(&hasher.finalize()),
-                        size: data.len() as u64,
-                        mtime,
-                    },
-                );
-            }
+                let mut buffer = [0u8; 64 * 1024];
+                let mut failed = false;
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => hasher.update(&buffer[..count]),
+                        Err(_) => { failed = true; break; }
+                    }
+                }
+                if failed { continue; }
+                hex_encode(&hasher.finalize())
+            } else { String::new() };
+            let mtime = metadata.modified().ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64);
+            out.insert(rel, SyncFileInfo { hash, size: metadata.len(), mtime });
         }
     }
 }
 
 #[tauri::command]
-fn dir_sync_scan(
+async fn dir_sync_scan(
     dir: String,
     ignore: Vec<String>,
     include_git: Option<bool>,
+    hash_files: Option<bool>,
 ) -> Result<SyncScanResult, String> {
-    let root = std::fs::canonicalize(&dir).map_err(|e| format!("副本目录无效: {e}"))?;
-    if !root.is_dir() {
-        return Err("副本目录不存在".into());
-    }
-    let mut files = HashMap::new();
-    scan_dir(
-        &root,
-        &root,
-        &ignore,
-        include_git.unwrap_or(false),
-        &mut files,
-    );
-    Ok(SyncScanResult { files })
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::fs::canonicalize(&dir).map_err(|error| format!("副本目录无效: {error}"))?;
+        if !root.is_dir() { return Err("副本目录不存在".into()); }
+        let mut files = HashMap::new();
+        scan_dir(&root, &root, &ignore, include_git.unwrap_or(false), hash_files.unwrap_or(true), &mut files);
+        Ok(SyncScanResult { files })
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1032,6 +1033,26 @@ fn dir_sync_read_file(dir: String, rel: String) -> Result<String, String> {
     let (_root, target) = sync_resolve(&dir, &rel)?;
     let data = std::fs::read(&target).map_err(|e| e.to_string())?;
     Ok(BASE64.encode(&data))
+}
+
+#[cfg(test)]
+mod sync_scan_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_scan_skips_hash_and_full_scan_keeps_digest() {
+        let root = std::env::temp_dir().join(format!("awu-scan-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("sample.txt"), b"abc").unwrap();
+        let mut metadata = HashMap::new();
+        scan_dir(&root, &root, &[], false, false, &mut metadata);
+        let mut hashed = HashMap::new();
+        scan_dir(&root, &root, &[], false, true, &mut hashed);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(metadata["sample.txt"].size, 3);
+        assert_eq!(metadata["sample.txt"].hash, "");
+        assert_eq!(hashed["sample.txt"].hash, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
 }
 
 #[tauri::command]

@@ -25,7 +25,7 @@ if (typeof document !== 'undefined' && !document.getElementById('skill-market-cs
 interface Props {
   open: boolean;
   onClose: () => void;
-  onInstalled: () => Promise<void> | void;
+  onInstalled: (name?: string) => Promise<void> | void;
 }
 
 const EMPTY_CATALOG: SkillMarketCatalog = {
@@ -148,9 +148,9 @@ export const SkillMarketDialog: React.FC<Props> = ({ open, onClose, onInstalled 
       }
       setMessage({
         kind: 'ok',
-        text: `${selected.name} ${selected.installed ? '更新' : '安装'}完成；可在会话能力中直接绑定。`,
+        text: selected.name + " 文件已导入，接下来检查目标节点的运行环境。",
       });
-      await onInstalled();
+      await onInstalled(result.skill?.name || result.skill?.id || selected.name);
       await load(false);
     } finally {
       setInstallingId('');

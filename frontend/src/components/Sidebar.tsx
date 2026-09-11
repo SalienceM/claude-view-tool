@@ -760,7 +760,7 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
             <div style={{ color: 'var(--theme-text)', fontWeight: 600, marginBottom: 5 }}>🌐 Codex SSH Remote · {activeCodexRemoteHost}</div>
             当前会话的文件与命令位于 SSH 主机上，由远端 Codex 工具操作。为避免误操作本机同名目录，这里不展示本机文件树。
           </div>
-        ) : <FileTreePanel sessionId={activeSessionId || undefined} workingDir={activeWorkingDir || ''} execKey={activeExecKey} execLabel={activeExecLabel} execMode={activeExecMode} backendId={activeBackendId}
+        ) : <FileTreePanel key={JSON.stringify([activeSessionId, activeExecKey, activeWorkingDir])} sessionId={activeSessionId || undefined} workingDir={activeWorkingDir || ''} execKey={activeExecKey} execLabel={activeExecLabel} execMode={activeExecMode} backendId={activeBackendId}
           focusRequest={activeSessionMetaId === activeSessionId && fileFocusRequest?.sessionId === activeSessionId ? fileFocusRequest : null}
           onAttentionChange={onAttentionChange} />
       ) : (
@@ -1596,12 +1596,12 @@ const mobileSidebarStyle: React.CSSProperties = {
   top: 0,
   bottom: 0,
   left: 0,
-  width: 'min(280px, 85vw)',
+  width: 'min(360px, calc(100vw - 32px))',
   zIndex: 1100,
   borderRight: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   display: 'flex',
   flexDirection: 'column',
-  background: 'var(--theme-sidebar-bg, #f6f8fa)',
+  background: 'var(--theme-sidebar-solid, var(--theme-sidebar-bg, #f6f8fa))',
   boxShadow: '2px 0 16px rgba(0,0,0,0.35)',
 };
 
@@ -1920,14 +1920,16 @@ const codexSshBadgeStyle: React.CSSProperties = {
 
 const overlayStyle: React.CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1400,
+  padding: 'max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom))',
+  boxSizing: 'border-box',
 };
 
 const confirmPanelStyle: React.CSSProperties = {
-  background: 'var(--theme-bg-secondary, #ffffff)',
+  background: 'var(--theme-panel-solid, var(--theme-bg-secondary, #ffffff))',
   border: '1px solid var(--theme-border, rgba(0,0,0,0.15))',
   borderRadius: 8,
-  padding: 24, width: '90%', maxWidth: 400,
+  padding: 24, width: '90%', maxWidth: 400, maxHeight: '100%', overflowY: 'auto', boxSizing: 'border-box',
   boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
 };
 

@@ -433,6 +433,7 @@ class NodeUpdateAuthorizationTests(unittest.TestCase):
                 "previewBackendImport", "importBackends", "exportData", "importData",
                 "saveMcpServers",
                 "openLoginTerminal", "openModelTerminal",
+                "skillRuntimeInspect", "skillRuntimePrepare",
             ):
                 with self.subTest(method=method), self.assertRaises(PermissionError):
                     bridge._authorize_rpc(method, lambda: None, [])

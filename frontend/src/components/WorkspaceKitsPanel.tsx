@@ -631,11 +631,28 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
   };
 
   return (
-    <div style={overlayStyle} onMouseDown={(event) => {
+    <div className="awu-kits-overlay" style={overlayStyle} onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <div style={panelStyle} onMouseDown={(event) => event.stopPropagation()}>
-        <header style={headerStyle}>
+      <style>{`
+        @media (max-width: 680px) {
+          .awu-kits-overlay { position: fixed !important; z-index: 1400 !important; }
+          .awu-kits-panel { width: 100% !important; max-width: 100vw; background: var(--theme-panel-solid, #161b22) !important; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; }
+          .awu-kits-header { flex-direction: column; align-items: stretch !important; gap: 8px !important; padding: 10px 12px !important; flex-shrink: 0; }
+          .awu-kits-header-actions { flex-wrap: wrap; align-items: center; }
+          .awu-kits-header-actions button { white-space: nowrap; min-height: 40px; flex-shrink: 0; }
+          .awu-kits-header-actions button:last-child { margin-left: auto; min-width: 40px; }
+          .awu-kits-detail-sidebar { display: none; }
+          .awu-kits-panel button { min-height: 36px; }
+          .awu-kits-panel input, .awu-kits-panel textarea, .awu-kits-panel select { max-width: 100%; box-sizing: border-box; font-size: 16px !important; }
+          .awu-kits-panel { overflow-wrap: anywhere; --awu-kit-columns: minmax(0, 1fr); }
+          .awu-kit-detail-heading { flex-direction: column; }
+          .awu-kit-detail-badges, .awu-kits-list-toolbar { flex-wrap: wrap; }
+          .awu-kit-detail-actions { justify-content: flex-start !important; }
+        }
+      `}</style>
+      <div className="awu-kits-panel" style={panelStyle} onMouseDown={(event) => event.stopPropagation()}>
+        <header className="awu-kits-header" style={headerStyle}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <strong>🧰 Workspace Kits</strong>
@@ -643,10 +660,10 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
             </div>
             <div style={subtleStyle}>这个 Session 的标准配件、判言、视图窗与数据依赖</div>
           </div>
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div className="awu-kits-header-actions" style={{ display: 'flex', gap: 6 }}>
             {view === 'kits' && (detailOpen || draft) && (
               <button style={secondaryButton} onClick={() => { setDraft(null); setDetailOpen(false); }}>
-                ← 收起详情
+                ← 返回列表
               </button>
             )}
             <button style={tabButton(view === 'kits')} onClick={() => setView('kits')}>配件</button>
@@ -707,7 +724,7 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
           <DataMarket state={state} />
         ) : !detailOpen && !draft ? (
           <div style={compactListStyle}>
-            <div style={compactListToolbar}>
+            <div className="awu-kits-list-toolbar" style={compactListToolbar}>
               <div>
                 <div style={sectionTitle}>Kits</div>
                 <div style={subtleStyle}>直接运行；需要输入或审计实现时再展开详情。</div>
@@ -795,7 +812,7 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
           </div>
         ) : (
           <div style={bodyStyle}>
-            <aside style={sidebarStyle}>
+            <aside className="awu-kits-detail-sidebar" style={sidebarStyle}>
               <button
                 style={{ ...primaryButton, width: '100%', marginBottom: 10 }}
                 onClick={() => { setGenerationEditorJobId(''); setDraft(newDraft()); setDetailOpen(true); }}
@@ -1731,9 +1748,9 @@ const KitDetail: React.FC<{
   };
   return (
     <div style={{ padding: 18, overflow: 'auto', height: '100%', boxSizing: 'border-box' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+      <div className="awu-kit-detail-heading" style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="awu-kit-detail-badges" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <h3 style={{ margin: 0, fontSize: 17 }}>{kit.title}</h3>
             {kit.generatedByAi && <span style={experimentBadge}>AI 编译</span>}
             <span style={mutedPill}>{kit.executionTarget === 'client' ? '客户端' : '执行端默认'}</span>
@@ -1743,7 +1760,7 @@ const KitDetail: React.FC<{
           </div>
           {kit.description && <div style={{ ...subtleStyle, marginTop: 6 }}>{kit.description}</div>}
         </div>
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'flex-end', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+        <div className="awu-kit-detail-actions" style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'flex-end', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <KitVersionPicker sessionId={sessionId} kit={kit} running={running} compact />
           <button style={secondaryButton} onClick={onOptimize}>✨ 优化</button>
           <button style={secondaryButton} onClick={onToggleEnabled}>{kit.enabled ? '停用' : '启用'}</button>
@@ -2443,7 +2460,7 @@ const compactListToolbar: React.CSSProperties = {
   marginBottom: 14,
 };
 const compactKitGrid: React.CSSProperties = {
-  display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+  display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))',
   gap: 10, alignContent: 'start',
 };
 const compactKitCard: React.CSSProperties = {
@@ -2486,7 +2503,7 @@ const inputStyle: React.CSSProperties = {
   border: '1px solid var(--theme-border)', fontSize: 12, outline: 'none',
 };
 const miniInput: React.CSSProperties = { ...inputStyle, width: 'auto', minWidth: 80, flex: '0 1 150px', padding: '5px 7px' };
-const twoColumns: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 };
+const twoColumns: React.CSSProperties = { display: 'grid', gridTemplateColumns: 'var(--awu-kit-columns, repeat(2, minmax(0, 1fr)))', gap: 10 };
 const blockLabel: React.CSSProperties = { display: 'block', marginTop: 10 };
 const editorGroup: React.CSSProperties = { ...cardStyle, marginTop: 14 };
 const editorRow: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' };

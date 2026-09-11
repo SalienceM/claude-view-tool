@@ -15,6 +15,7 @@
  */
 import { api, isTauri } from '../api';
 import { sha256BlobHex } from './sha256';
+import { yieldToUi } from './cooperativeWork';
 import { isIgnored } from './dirSyncPolicy';
 export { isGitMetadataPath, isIgnored } from './dirSyncPolicy';
 
@@ -101,7 +102,7 @@ export interface LocalFs {
   label(): string;
   /** 跨会话稳定的标识，用于给基线做 key */
   id(): string;
-  scan(ignore: string[], includeGit?: boolean): Promise<Manifest>;
+  scan(ignore: string[], includeGit?: boolean, options?: { hash?: boolean; signal?: AbortSignal }): Promise<Manifest>;
   /** 列出某相对目录的直接子项(懒加载逐层浏览用,不递归、不算哈希)。 */
   listDir(rel: string): Promise<LocalEntry[]>;
   readFile(rel: string): Promise<string>; // base64
@@ -160,18 +161,19 @@ export class TauriLocalFs implements LocalFs {
   id(): string {
     return `tauri:${this.dir}`;
   }
-  async scan(ignore: string[], includeGit = false): Promise<Manifest> {
+  async scan(ignore: string[], includeGit = false, options: { hash?: boolean; signal?: AbortSignal } = {}): Promise<Manifest> {
     const r = await tauriInvoke<{ files: Manifest }>('dir_sync_scan', {
       dir: this.dir,
       ignore,
       includeGit,
+      hashFiles: options.hash !== false,
     });
     this._scanCache = r.files || {};
     return this._scanCache;
   }
   // Tauri 无逐层列目录命令,用一次性扫描结果推导层级(本地磁盘,代价可接受)。
   async listDir(rel: string): Promise<LocalEntry[]> {
-    if (!this._scanCache) await this.scan([]);
+    if (!this._scanCache) await this.scan([], false, { hash: false });
     return levelFromManifest(this._scanCache || {}, rel);
   }
   readFile(rel: string): Promise<string> {
@@ -219,9 +221,9 @@ export class BrowserLocalFs implements LocalFs {
   id(): string {
     return `browser:${this.handle?.name || ''}`;
   }
-  async scan(ignore: string[], includeGit = false): Promise<Manifest> {
+  async scan(ignore: string[], includeGit = false, options: { hash?: boolean; signal?: AbortSignal } = {}): Promise<Manifest> {
     const out: Manifest = {};
-    await this._walk(this.handle, '', ignore, includeGit, out);
+    await this._walk(this.handle, '', ignore, includeGit, out, options);
     return out;
   }
   // 浏览器：原生逐层列目录（含空目录），不算哈希,快。
@@ -242,14 +244,22 @@ export class BrowserLocalFs implements LocalFs {
     ignore: string[],
     includeGit: boolean,
     out: Manifest,
+    options: { hash?: boolean; signal?: AbortSignal },
   ): Promise<void> {
+    let count = 0;
     for await (const [name, h] of dir.entries()) {
+      options.signal?.throwIfAborted();
+      if (++count % 64 === 0) await yieldToUi(options.signal);
       const rel = base ? `${base}/${name}` : name;
       if (isIgnored(rel, ignore, includeGit)) continue;
       if (h.kind === 'directory') {
-        await this._walk(h, rel, ignore, includeGit, out);
+        await this._walk(h, rel, ignore, includeGit, out, options);
       } else {
         const file = await h.getFile();
+        if (options.hash === false) {
+          out[rel] = { hash: '', size: file.size, mtime: file.lastModified };
+          continue;
+        }
         const cached = this.scanCache.get(rel);
         const hash = cached && cached.size === file.size && cached.modified === file.lastModified
           ? cached.hash
@@ -521,20 +531,21 @@ export class ManagedBrowserLocalFs implements LocalFs {
     await idbStoreDeleteMany(IDB_CHUNK_STORE, chunks.map((item) => item.key));
   }
 
-  async scan(ignore: string[], includeGit = false): Promise<Manifest> {
+  async scan(ignore: string[], includeGit = false, options: { hash?: boolean; signal?: AbortSignal } = {}): Promise<Manifest> {
     const out: Manifest = {};
     const records = await this.files();
     // 分批计算哈希，避免大量小文件同时把平板主线程和内存打满。
     for (let start = 0; start < records.length; start += 8) {
+      await yieldToUi(options.signal);
       await Promise.all(records.slice(start, start + 8).map(async (record) => {
         if (isIgnored(record.rel, ignore, includeGit)) return;
-        const hash = record.hash || await sha256BlobHex(record.data);
+        const hash = options.hash === false ? '' : record.hash || await sha256BlobHex(record.data);
         out[record.rel] = {
           hash,
           size: record.size,
           mtime: record.updatedAt,
         };
-        if (!record.hash) await idbStorePut(IDB_FILE_STORE, { ...record, hash });
+        if (hash && !record.hash) await idbStorePut(IDB_FILE_STORE, { ...record, hash });
       }));
     }
     return out;

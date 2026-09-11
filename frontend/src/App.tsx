@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { FileTransferCenter } from './components/FileTransferCenter';
 import {
   api, isTauri, getExecutors, getAssignableExecutors, onExecStatus, getHomeExecKey,
   getCurrentUserProfile, onCurrentUserChanged,
@@ -1206,6 +1207,8 @@ export const App: React.FC = () => {
       '--theme-code-bg': ua < 1 ? hexToRgba(theme.codeBg, ua) : theme.codeBg,
       '--theme-input-bg': ua < 1 ? hexToRgba(theme.inputBg, ua) : theme.inputBg,
       '--theme-sidebar-bg': ua < 1 ? hexToRgba(theme.sidebarBg, ua) : theme.sidebarBg,
+      '--theme-panel-solid': theme.bg,
+      '--theme-sidebar-solid': theme.sidebarBg,
       '--theme-success': theme.success,
       '--theme-success-bg': theme.successBg,
       '--theme-success-border': theme.successBorder,
@@ -1992,6 +1995,7 @@ export const App: React.FC = () => {
       )}
 
       {/* 全局最上层注意力助手：浮窗不遮断左侧浏览，停靠时成为根布局右侧分屏。 */}
+      <FileTransferCenter />
       <ThoughtsAssistant
         open={thoughtsOpen}
         onClose={() => setThoughtsOpen(false)}

@@ -151,6 +151,7 @@ export async function sha256BlobHex(blob: Blob): Promise<string> {
   const chunkSize = 1024 * 1024;
   for (let offset = 0; offset < blob.size; offset += chunkSize) {
     hasher.update(new Uint8Array(await blob.slice(offset, offset + chunkSize).arrayBuffer()));
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
   }
   return hasher.digestHex();
 }

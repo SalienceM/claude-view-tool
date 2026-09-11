@@ -36,6 +36,13 @@ export interface AttentionImageAttachment {
   height?: number;
 }
 
+/** 用户显式固定时才创建；只保存在内存，不把界面正文/图片写入 localStorage。 */
+export function bindAttention<TSession, TBackend>(
+  session: TSession, attention: AttentionContext, backends: TBackend[],
+): { session: TSession; attention: AttentionContext; backends: TBackend[] } {
+  return { session: { ...session }, attention: structuredClone(attention), backends: [...backends] };
+}
+
 export const ATTENTION_CONTENT_LIMIT = 50_000;
 
 const BINARY_KEYS = new Set([

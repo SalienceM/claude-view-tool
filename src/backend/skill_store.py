@@ -939,6 +939,7 @@ class SkillStore:
 
         with self._lock:
             destination = LIBRARY_DIR / name
+            LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
             if destination.exists() and not allow_replace:
                 raise FileExistsError(f"Skill '{name}' 已存在")
 

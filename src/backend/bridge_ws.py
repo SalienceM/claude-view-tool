@@ -57,6 +57,8 @@ from .backend_store import BackendStore
 from .app_config_store import AppConfigStore
 from .skill_store import SkillStore
 from .skill_market import SkillMarket
+from .skill_runtime import SkillRuntime
+from .chat_kits import ChatKitTools, TOOL as CHAT_KIT_TOOL, TOOL_NAME as CHAT_KIT_TOOL_NAME
 from .skill_paths import project_skill_reference, project_skill_root, render_skill_markdown
 from .prompt_store import PromptStore
 from .loop_store import (
@@ -746,6 +748,7 @@ class BridgeWS:
         self._backend_store = BackendStore()
         self._skill_store = SkillStore()
         self._skill_market = SkillMarket(self._skill_store)
+        self._skill_runtime = SkillRuntime(self._skill_store)
         self._prompt_store = PromptStore()
         # ★ 可视化 Loop 集成：stage 文件存储 + 并发想法池 + 运行去重
         self._loop_store = LoopStore()
@@ -911,6 +914,12 @@ class BridgeWS:
 
         # ★ 解析 Python 解释器：冻结环境下 sys.executable 是 .exe，不能用来跑 .py
         python_exe = self._resolve_python_exe()
+        runtime = getattr(self, "_skill_runtime", None)
+        if runtime:
+            try:
+                python_exe = (await asyncio.to_thread(runtime.interpreter, skill_name)) or python_exe
+            except (ValueError, OSError):
+                pass
         if not python_exe:
             return 500, (
                 f"Skill '{skill_name}' 需要 Python 解释器，但在打包环境中未找到系统 Python。\n"
@@ -1261,6 +1270,23 @@ class BridgeWS:
         from urllib.parse import urlparse, parse_qs
 
         parsed = urlparse(path)
+
+        if parsed.path == "/api/chat-kits":
+            if not self._is_loopback(peer_ip):
+                return 403, "Forbidden: chat Kit tools are local-only"
+            if method != "POST":
+                return 405, "POST required"
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict) or not isinstance(payload.get("token"), str):
+                    return 400, "Invalid chat Kit request"
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return 400, "Invalid JSON body"
+            service = getattr(self, "_chat_kit_tools", None)
+            if service is None or payload["token"] not in service.leases:
+                return 403, "Chat Kit authorization expired"
+            result = await service.call(payload["token"], payload.get("arguments"))
+            return 200, json.dumps(result, ensure_ascii=False)
 
         if parsed.path == "/api/skill-call":
             # ★ skill-call 会触发 Skill 执行，只允许本机回环来源（Agent 子进程的 curl）
@@ -1925,6 +1951,7 @@ class BridgeWS:
             method.startswith("nodeUpdate")
             or method.startswith("release")
             or method.startswith("relayNode")
+            or method.startswith("skillRuntime")
             or method in {
                 "saveBackend", "deleteBackend", "exportBackends", "poeAccountOverview",
                 "previewBackendImport", "importBackends",
@@ -11708,6 +11735,23 @@ Kit 版本账本（版本属于 Kit，不属于 AI）：
             print(f"[BridgeWS] skillMarketInstall error: {e}", file=sys.stderr)
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
+    async def _rpc_skillRuntimeInspect(self, name: str, review: bool = False) -> str:
+        """只读检查目标节点环境；review 发出短期一次性安装计划凭据。"""
+        try:
+            action = self._skill_runtime.review if review else self._skill_runtime.inspect
+            plan = await asyncio.to_thread(action, name)
+            return json.dumps({"status": "ok", "plan": plan}, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False)
+
+    async def _rpc_skillRuntimePrepare(self, name: str, approval_token: str) -> str:
+        """执行明确确认过的计划，任务独立于浏览器/RPC 存活。"""
+        try:
+            result = await self._skill_runtime.start(name, approval_token)
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False)
+
     # 内置类型的默认 secrets schema（用户在 skill 库中无 secrets.schema.json 时使用）
     _BUILTIN_SECRETS_SCHEMA: dict[str, dict] = {
         "web-search": {
@@ -13860,6 +13904,16 @@ except urllib.error.URLError as e:
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
+    async def _rpc_syncDeleteEntry(self, working_dir: str, rel: str, expected_directory: bool) -> str:
+        from .workspace_delete import delete_workspace_entry
+        try:
+            if not isinstance(expected_directory, bool):
+                raise ValueError("必须明确指定删除文件还是目录")
+            await asyncio.to_thread(delete_workspace_entry, working_dir, rel, expected_directory)
+            return json.dumps({"status": "ok"}, ensure_ascii=False)
+        except Exception as error:
+            return json.dumps({"status": "error", "message": str(error)}, ensure_ascii=False)
+
     def _rpc_getSyncConfig(self) -> str:
         """返回当前忽略清单与默认值，供同步面板编辑。"""
         return json.dumps({
@@ -15205,6 +15259,15 @@ except urllib.error.URLError as e:
         """会话约束 + 素材池上下文块（后者不写入持久化的 session.constraints）。"""
         session_constraints = self._strip_generated_backend_skill_block(session.constraints)
         parts = [p for p in (session_constraints, self._build_asset_context_block()) if p]
+        runtime = getattr(self, "_skill_runtime", None)
+        if runtime:
+            for skill_name in (session.abilities or {}).get("skills", []):
+                try:
+                    hint = runtime.hint(skill_name)
+                    if hint:
+                        parts.append(hint)
+                except (ValueError, OSError):
+                    pass
         return "\n\n---\n\n".join(parts) if parts else None
 
     @staticmethod
@@ -15498,11 +15561,57 @@ except urllib.error.URLError as e:
         constraints: Optional[str] = None,
         runtime: Optional[dict] = None,
     ):
+        service = getattr(self, "_chat_kit_tools", None)
+        if service is None:
+            service = self._chat_kit_tools = ChatKitTools(self)
+        # 兼容旧 SSH 线程的 localhost 指向另一台机器，不能给出无效或错节点的入口。
+        from .anthropic_api import AnthropicAPIBackend
+        from .openai_compat import OpenAICompatibleBackend
+        from .claude_agent import ClaudeAgentBackend
+        from .claude_code import ClaudeCodeOfficialBackend
+        token = ""
+        if session.codex_connection_mode != "ssh":
+            backend = self._get_backend(backend_id)
+            # 图片等非工具 Backend 不得收到带令牌的控制指令。
+            if isinstance(backend, (
+                AnthropicAPIBackend, OpenAICompatibleBackend, CodexOfficeBackend,
+                QwenCodeSdkBackend, ClaudeAgentBackend, ClaudeCodeOfficialBackend,
+            )):
+                token = service.issue(session.id)
+        try:
+            if token:
+                if isinstance(backend, (AnthropicAPIBackend, OpenAICompatibleBackend)):
+                    constraints = "\n\n".join(part for part in (
+                        constraints, CHAT_KIT_TOOL["description"],
+                    ) if part)
+            await self._async_send_with_kit_tools(
+                session, content, images, backend_id, message_id,
+                auto_continue, skip_permissions, constraints, runtime, kit_token=token,
+            )
+        finally:
+            service.revoke(token)
+
+    async def _async_send_with_kit_tools(
+        self,
+        session: Session,
+        content: str,
+        images: Optional[list[ImageAttachment]],
+        backend_id: str,
+        message_id: str,
+        auto_continue: bool = True,
+        skip_permissions: bool = True,
+        constraints: Optional[str] = None,
+        runtime: Optional[dict] = None,
+        kit_token: str = "",
+    ):
         backend = self._get_backend(backend_id)
         assistant_msg = session.messages[-1]
 
         # ── 收集 Backend Skills（API 类 backend 使用）──
         extra_tools, skill_map = self._collect_backend_skills(session)
+        if kit_token:
+            extra_tools = [tool for tool in extra_tools if tool["name"] != CHAT_KIT_TOOL_NAME]
+            extra_tools.append(CHAT_KIT_TOOL)
         if extra_tools:
             print(f"[bridge_ws] Session {session.id}: {len(extra_tools)} Backend Skills detected: "
                   f"{[t['name'] for t in extra_tools]}", file=sys.stderr, flush=True)
@@ -15525,6 +15634,9 @@ except urllib.error.URLError as e:
 
         async def _on_tool_call(tool_name: str, tool_input: dict) -> str:
             """Skill 工具调用回调：路由到 Backend Skill 或内置/python-script 类型。"""
+            if kit_token and tool_name == CHAT_KIT_TOOL_NAME:
+                result = await self._chat_kit_tools.call(kit_token, tool_input)
+                return json.dumps(result, ensure_ascii=False)
             mapping = (skill_map or {}).get(tool_name, {})
             skill_type = mapping.get("skill_type", "")
             sname = mapping.get("skill_name", tool_name.replace("_", "-"))
@@ -15749,6 +15861,16 @@ except urllib.error.URLError as e:
 
                 use_agent_session = session.agent_session_id
 
+                # Codex/Qwen 恢复线程时跳过 session constraints。轮次令牌必须在每次
+                # 模型输入边界注入，不写聊天记录，也不依赖第一轮的过期 system prompt。
+                if kit_token:
+                    from .anthropic_api import AnthropicAPIBackend
+                    from .openai_compat import OpenAICompatibleBackend
+                    if not isinstance(backend, (AnthropicAPIBackend, OpenAICompatibleBackend)):
+                        send_content = self._chat_kit_tools.instructions(
+                            kit_token, self._HTTP_API_PORT,
+                        ) + "\n\n【用户本轮请求】\n" + send_content
+
                 # ★ 权限回调：用于工具执行前的权限确认
                 async def _on_permission_request(req: PermissionRequest) -> bool:
                     """处理来自 backend 的权限请求，转发给前端等待确认。"""
@@ -15795,7 +15917,7 @@ except urllib.error.URLError as e:
                 }
                 # ★ API 类 backend：注入 Backend Skill 工具定义 + tool_use 回调
                 # CLI 类 backend：不需要注入，走原生 Skill 目录发现 + curl 回调
-                if extra_tools and skill_map:
+                if extra_tools:
                     from .anthropic_api import AnthropicAPIBackend
                     from .openai_compat import OpenAICompatibleBackend
                     if isinstance(backend, (AnthropicAPIBackend, OpenAICompatibleBackend)):

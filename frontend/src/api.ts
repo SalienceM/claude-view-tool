@@ -17,6 +17,7 @@ import type {
   ProvDocument, ProvOpenResult, ProvResolveResult, ProvSaveResult,
 } from './types/prov';
 import { filterGitMetadata } from './utils/dirSyncPolicy';
+import { SessionRoutingCache } from './utils/sessionRouting';
 import { rankFileSearchPaths } from './utils/fileSearch';
 import { mergeExecutorSessionBatches, selectExactExecutor } from './utils/executorSessions';
 
@@ -788,6 +789,7 @@ const pendingConn = new Map<string, string>();
 // 每个执行节点最后一次成功取得的列表。节点短暂断线/假在线时继续展示，
 // 避免整个 session 分组忽隐忽现。
 const sessionListCache = new Map<string, any[]>();
+const sessionRoutingCache = new SessionRoutingCache();
 let listSessionsInFlight: Promise<any[]> | null = null;
 let relayIdentityEpoch = 0;
 const SESSION_LIST_CACHE_KEY = 'awu.sessionListCache.v1';
@@ -845,6 +847,8 @@ function handleMessage(e: MessageEvent, source?: Conn) {
         summary: parsed?.summary ? { ...parsed.summary, ...execMeta } : parsed?.summary,
       };
       const sessionId = data?.sessionId || data?.summary?.id;
+      if (sessionId && data.type === 'session_deleted') sessionRoutingCache.delete(sessionId);
+      else if (sessionId && data.summary) sessionRoutingCache.update(sessionId, data.summary);
       if (source && sessionId) {
         if (data.type === 'session_deleted') {
           sessionExec.delete(sessionId);
@@ -899,6 +903,11 @@ function handleMessage(e: MessageEvent, source?: Conn) {
       }
     } else if (msg.event === 'loopUpdated') {
       const data = JSON.parse(msg.data);
+      if (data.sessionId && (data.controlMode === 'manual' || data.controlMode === 'loop')) {
+        sessionRoutingCache.update(data.sessionId, {
+          sessionType: 'loop', loopControlMode: data.controlMode, loopRunning: data.running === true,
+        });
+      }
       loopUpdatedCallbacks.forEach((cb) => cb(data));
     } else if (msg.event === 'loopProgress') {
       const data = JSON.parse(msg.data);
@@ -1354,6 +1363,7 @@ function clearRelaySessionCaches(): void {
 
 /** 身份切换是安全边界：旧用户的全部连接、路由与离线 Session 缓存都丢弃。 */
 function clearRelayIdentityState(): void {
+  sessionRoutingCache.clear();
   relayIdentityEpoch += 1;
   listSessionsInFlight = null;
   for (const [key, connection] of [...pool.entries()]) {
@@ -2160,14 +2170,21 @@ export const api = {
 
   /** 只拉 index 元数据，不读取消息正文或 LOOP stage；用于 pane 首屏路由。 */
   async loadSessionMeta(id: string): Promise<any | null> {
-    const cached = cachedSessionMeta(id);
+    const cached = api.peekSessionMeta(id);
+    const revision = sessionRoutingCache.revision(id);
     // 冷启动离线时不能等待 WebSocket 超时后才让平板进入文件副本。
     if (!routeConn('loadSessionMeta', [id]).isOpen && cached) return cached;
     const result = await call('loadSessionMeta', id);
     try {
       const parsed = attachSessionExecutor(JSON.parse(result));
-      return parsed || cached;
+      return parsed ? sessionRoutingCache.loaded(id, parsed, revision) : cached;
     } catch { return cached; }
+  },
+
+  peekSessionMeta(id: string): any | null {
+    const cached = cachedSessionMeta(id);
+    const fresh = sessionRoutingCache.get(id);
+    return fresh || cached ? { ...cached, ...fresh } : null;
   },
 
   /** 翻页加载 session 的更老消息。等价于 messages[offset : offset+limit]。 */
@@ -3394,6 +3411,11 @@ export const api = {
     try { return JSON.parse(result); } catch { return { status: 'error', message: 'syncDeleteFile 无响应' }; }
   },
 
+  async syncDeleteEntry(workingDir: string, rel: string, isDirectory: boolean, execKey?: string): Promise<{ status: string; message?: string }> {
+    const result = await callOnStrict(execKey, 'syncDeleteEntry', [workingDir, rel, isDirectory]);
+    return parseRpcObject(result, { status: 'error', message: '删除未返回明确结果，请刷新确认' });
+  },
+
   async filePreview(workingDir: string, rel: string, execKey?: string): Promise<any> {
     const result = await callOn(execKey, 'filePreview', workingDir, rel);
     try { return JSON.parse(result); } catch { return { status: 'error', message: '预览服务无响应' }; }
@@ -3634,6 +3656,16 @@ export const api = {
   },
 
   // ── Secrets 管理（凭据不传 LLM）────────────────────────────────────────
+  async skillRuntimeInspect(name: string, execKey: string, review = false): Promise<any> {
+    const result = await callOnStrict(execKey, 'skillRuntimeInspect', [name, review], 60_000);
+    return typeof result === 'string' ? JSON.parse(result) : result;
+  },
+
+  async skillRuntimePrepare(name: string, execKey: string, approvalToken: string): Promise<any> {
+    const result = await callOnStrict(execKey, 'skillRuntimePrepare', [name, approvalToken], 60_000);
+    return typeof result === 'string' ? JSON.parse(result) : result;
+  },
+
   async getSkillSecretsSchema(name: string): Promise<{ fields: Array<{ key: string; label: string; type: 'text' | 'password' | 'textarea'; required?: boolean; placeholder?: string }> } | null> {
     const result = await call('getSkillSecretsSchema', name);
     try { return result ? JSON.parse(result) : null; } catch { return null; }

@@ -5,6 +5,7 @@ import { themes, useConfig } from '../hooks/useConfig';
 import { markdownToHtml } from '../utils/markdown';
 import {
   attentionIcon,
+  bindAttention,
   type AttentionContext,
   type AttentionKind,
 } from '../utils/attentionContext';
@@ -70,13 +71,18 @@ function turnContext(turn: AsideTurn): AttentionContext {
 export const ThoughtsAssistant: React.FC<Props> = ({
   open,
   onClose,
-  session,
-  attention,
-  backends,
+  session: currentSession,
+  attention: currentAttention,
+  backends: currentBackends,
   isMobile = false,
   standalone = false,
   onDetach,
 }) => {
+  // 固定的是请求目标和瞬时快照，不只是下拉框；切换 Session 不能改写绑定。
+  const [binding, setBinding] = useState<{ session: any; attention: AttentionContext; backends: any[] } | null>(null);
+  const session = binding ? binding.session : currentSession;
+  const attention = binding ? binding.attention : currentAttention;
+  const backends = binding ? binding.backends : currentBackends;
   const sessionId = session?.id || '';
   const isLoop = session?.sessionType === 'loop';
   const [mode, setMode] = useState<PanelMode>(storedMode);
@@ -321,7 +327,7 @@ export const ThoughtsAssistant: React.FC<Props> = ({
           </button>
         )}
         {!standalone && !isMobile && onDetach && (
-          <button type="button" style={{ ...iconButton, width: 'auto', padding: '0 9px' }} onClick={onDetach} title="分离为独立宽窗口，方便系统分屏">⧉ 分离</button>
+          <button type="button" disabled={!!binding} style={{ ...iconButton, width: 'auto', padding: '0 9px', opacity: binding ? 0.5 : 1 }} onClick={onDetach} title={binding ? '请先解除注意力固定，再分离窗口' : '分离为独立宽窗口，方便系统分屏'}>⧉ 分离</button>
         )}
         {standalone && (
           <button
@@ -345,7 +351,7 @@ export const ThoughtsAssistant: React.FC<Props> = ({
               <strong style={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {displayedAttention.label}
               </strong>
-              {followFocus && <span style={followingBadge}>跟随中</span>}
+              <span style={followingBadge}>{binding ? '📌 已固定' : followFocus ? '跟随中' : '历史线程'}</span>
             </div>
             <div title={displayedAttention.detail} style={attentionDetail}>{displayedAttention.detail || '当前 Session'}</div>
           </div>
@@ -355,6 +361,7 @@ export const ThoughtsAssistant: React.FC<Props> = ({
             value={displayedAttention.key}
             style={contextSelect}
             aria-label="切换俺寻思的注意力线程"
+            disabled={!!binding}
             onChange={(event) => {
               setSelectedContextKey(event.target.value);
               setFollowFocus(event.target.value === attention.key);
@@ -362,7 +369,19 @@ export const ThoughtsAssistant: React.FC<Props> = ({
           >
             {contexts.map((item) => <option key={item.key} value={item.key}>{attentionIcon(item.kind)} {item.label}</option>)}
           </select>
-          {!followFocus && <button style={followButton} onClick={() => { setFollowFocus(true); setSelectedContextKey(attention.key); }}>◎ 回到当前</button>}
+          <button type="button" style={followButton} disabled={!sessionId} aria-pressed={!!binding}
+            title={binding ? '解除固定，重新跟随当前界面' : '绑定当前注意力、Session 和执行节点；切换界面不会漂移'}
+            onClick={() => {
+              if (binding) {
+                setBinding(null);
+                setSelectedContextKey(currentAttention.key);
+              } else {
+                setBinding(bindAttention(session, attentionForRequest(), backends));
+                setSelectedContextKey(displayedAttention.key);
+              }
+              setFollowFocus(true);
+            }}>{binding ? '◎ 解除固定' : '📌 固定注意力'}</button>
+          {!binding && !followFocus && <button style={followButton} onClick={() => { setFollowFocus(true); setSelectedContextKey(attention.key); }}>◎ 回到当前</button>}
         </div>
         <div style={snapshotLine}>
           <span>{session ? `Session · ${session.title || session.name || session.id.slice(0, 8)}` : '尚未选择 Session'}</span>
