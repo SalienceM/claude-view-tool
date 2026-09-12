@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo, useReducer } from 'react';
 import { FileTransferCenter } from './components/FileTransferCenter';
 import {
   api, isTauri, getExecutors, getAssignableExecutors, onExecStatus, getHomeExecKey,
@@ -20,6 +20,12 @@ import { Sidebar } from './components/Sidebar';
 import { Settings } from './components/Settings';
 import { BackendManager } from './components/BackendManager';
 import { RepoPanel } from './components/RepoPanel';
+import { SkillMarketDialog } from './components/SkillMarketDialog';
+import { SkillRuntimeDialog } from './components/SkillRuntimeDialog';
+import { WorkbenchTabs } from './components/WorkbenchNavigation';
+import { AppModalVisibilityContext } from './components/AppModalPortal';
+import { uiDensityCss } from './utils/uiDensity';
+import { initialWorkbench, workbenchReducer, isConversationTab, sessionWorkbenchTab, workbenchSessionId, selectSessionPane, type SidebarView, type WorkbenchTab } from './utils/workbench';
 import { ScratchPad } from './components/ScratchPad';
 import { AssetPanel } from './components/AssetPanel';
 import { ServerDirPicker } from './components/ServerDirPicker';
@@ -102,7 +108,12 @@ export const App: React.FC = () => {
   const [backendManagerLoading, setBackendManagerLoading] = useState(false);
   const [backendManagerError, setBackendManagerError] = useState('');
   const backendManagerLoadGenerationRef = useRef(0);
-  const [repoPanelOpen, setRepoPanelOpen] = useState(false);
+  const [workbench, dispatchWorkbench] = useReducer(workbenchReducer, initialWorkbench);
+  const [sidebarView, setSidebarView] = useState<SidebarView>('sessions');
+  const chatWorkspaceVisible = isConversationTab(workbench.active);
+  const repoPanelOpen = !chatWorkspaceVisible;
+  const [skillLibraryRevision, setSkillLibraryRevision] = useState(0);
+  const [marketRuntimeNames, setMarketRuntimeNames] = useState<string[]>([]);
   const [logViewerOpen, setLogViewerOpen] = useState(false);
   const [connPanelOpen, setConnPanelOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUserProfile>(() => getCurrentUserProfile());
@@ -136,7 +147,7 @@ export const App: React.FC = () => {
   // 侧栏宽度可拖拽(localStorage 持久化),规避窄侧栏下文件目录树太挤。
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     try { const v = parseInt(localStorage.getItem('awu.sidebarWidth') || '', 10); if (v >= 200 && v <= 640) return v; } catch { /* */ }
-    return 260;
+    return 272;
   });
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
@@ -176,7 +187,13 @@ export const App: React.FC = () => {
       const saved = localStorage.getItem('agent-with-u:pane-sessions');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length === 4) return parsed;
+        if (Array.isArray(parsed) && parsed.length === 4) {
+          const seen = new Set<string>();
+          return parsed.map(id => {
+            if (typeof id !== 'string' || !id || seen.has(id)) return null;
+            seen.add(id); return id;
+          });
+        }
       }
     } catch {}
     return [null, null, null, null];
@@ -187,6 +204,8 @@ export const App: React.FC = () => {
   const activeSessionId = paneSessions[focusedPaneIdx] ?? null;
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
+  const visibleSessionIdRef = useRef<string | null>(null);
+  visibleSessionIdRef.current = chatWorkspaceVisible ? activeSessionId : null;
 
   // 焦点 pane 的 session 详情(顶栏展示 workingDir / backendId 用)
   const [activeSession, setActiveSession] = useState<any | null>(null);
@@ -194,6 +213,10 @@ export const App: React.FC = () => {
   useEffect(() => onCurrentUserChanged((profile, identityChanged) => {
     setCurrentUser(profile);
     if (!identityChanged) return;
+    dispatchWorkbench({ type: 'reset' });
+    setMarketRuntimeNames([]);
+    setRepoPanelEditing(false);
+    setSidebarView('sessions');
     for (const session of sessionsRef.current) {
       if (session?.id) clearSessionHistoryCache(session.id);
     }
@@ -207,20 +230,62 @@ export const App: React.FC = () => {
 
   // 把 sessionId 写入指定 pane(默认焦点 pane)的小工具
   const setSessionInPane = useCallback((id: string | null, paneIdx?: number) => {
-    setPaneSessions((prev) => {
-      const idx = paneIdx ?? focusedPaneIdx;
-      if (prev[idx] === id) return prev;
-      const next = [...prev];
-      next[idx] = id;
-      return next;
+    const selected = selectSessionPane(paneSessions, id, paneIdx ?? focusedPaneIdx, LAYOUT_SLOTS[layout]);
+    dispatchWorkbench({ type: 'open', tab: id ? sessionWorkbenchTab(id) : 'chat' });
+    setPaneSessions(selected.panes);
+    setFocusedPaneIdx(selected.focused);
+    if (id) setCompletedSessions(previous => {
+      if (!previous.has(id)) return previous;
+      const next = new Set(previous); next.delete(id); return next;
     });
-  }, [focusedPaneIdx]);
+  }, [focusedPaneIdx, paneSessions, layout]);
+
+  // 分屏焦点、启动恢复、会话迁移也走同一个标签账本；列表更新不会重排/打开所有 Session。
+  useEffect(() => {
+    dispatchWorkbench({ type: 'syncSessions', sessionIds: paneSessions, focusedSessionId: activeSessionId });
+  }, [paneSessions, activeSessionId]);
+
+  useEffect(() => {
+    if (!activeSessionId || !chatWorkspaceVisible) return;
+    setCompletedSessions(previous => {
+      if (!previous.has(activeSessionId)) return previous;
+      const next = new Set(previous); next.delete(activeSessionId); return next;
+    });
+  }, [activeSessionId, chatWorkspaceVisible]);
+
+  const selectWorkbenchTab = useCallback((tab: WorkbenchTab) => {
+    if (isConversationTab(tab)) {
+      setSessionInPane(workbenchSessionId(tab));
+      setSurfaceFocus(tab === 'chat' ? 'home' : 'session');
+    } else {
+      dispatchWorkbench({ type: 'open', tab }); setSurfaceFocus('skills');
+    }
+  }, [setSessionInPane]);
+
+  const closeWorkbenchTab = useCallback((tab: WorkbenchTab) => {
+    if (tab === 'library' && repoPanelEditing) {
+      setToast({ type: 'info', message: '请先保存或退出技能/提示词编辑，再关闭标签页。切换标签不会丢失草稿。' });
+      return;
+    }
+    const next = workbenchReducer(workbench, { type: 'close', tab });
+    const sid = workbenchSessionId(tab);
+    const panes = sid ? paneSessions.map(id => id === sid ? null : id) : paneSessions;
+    if (next.active !== workbench.active && isConversationTab(next.active)) {
+      const selected = selectSessionPane(panes, workbenchSessionId(next.active), focusedPaneIdx, LAYOUT_SLOTS[layout]);
+      setPaneSessions(selected.panes); setFocusedPaneIdx(selected.focused);
+    } else if (sid) setPaneSessions(panes);
+    dispatchWorkbench({ type: 'close', tab });
+  }, [workbench, paneSessions, focusedPaneIdx, layout, repoPanelEditing]);
 
   const { config, updateConfig, resetConfig } = useConfig(currentUser);
   const configRef = useRef(config);
   configRef.current = config;
   const notifiedCompletionKeysRef = useRef<Set<string>>(new Set());
   const isMobile = useIsMobile();
+  const openExtensionTab = useCallback((tab: 'library' | 'market') => {
+    dispatchWorkbench({ type: 'open', tab }); setSurfaceFocus('skills');
+    if (isMobile) setSidebarCollapsed(true);
+  }, [isMobile]);
   const activeManualLoop = activeSession?.id === activeSessionId
     && activeSession?.sessionType === 'loop'
     && activeSession?.loopControlMode === 'manual';
@@ -560,12 +625,11 @@ export const App: React.FC = () => {
         refreshSessionList();
       }
       if (t === 'session_deleted') {
+        closeWorkbenchTab(sessionWorkbenchTab(data.sessionId));
         setSessions((prev) => prev.filter((session) => session.id !== data.sessionId));
-        // 当前正在查看的 session 被其它客户端删除:把任何 pane 里指向它的位置清掉
-        setPaneSessions((prev) => prev.map((s) => (s === data.sessionId ? null : s)));
       }
     });
-  }, [backendConnected, refreshSessionList]);
+  }, [backendConnected, refreshSessionList, closeWorkbenchTab]);
 
   /* ---- 加载焦点 pane 的 session 详情(用于顶栏 workingDir / backend 展示) ---- */
   useEffect(() => {
@@ -653,9 +717,9 @@ export const App: React.FC = () => {
       '当前焦点是新建 Session 流程。');
     if (dataPicker) return panel('settings', `panel:data-${dataPicker}`, dataPicker === 'export' ? '数据导出' : '数据导入', '正在选择服务器路径',
       `当前焦点是${dataPicker === 'export' ? '导出' : '导入'}路径选择。`);
+    if (surfaceFocus === 'skills' && repoPanelOpen) return panel('skills', `panel:${workbench.active}`, workbench.active === 'market' ? '扩展市场' : 'Skills 与 Prompts', activeSession?.workingDir || '全局资源库',
+      '当前正在扩展工作区浏览市场或编辑 Skills 与 Prompts。具体编辑内容可通过当前编辑器或提问附件补充。');
     if (fileAttention?.sessionId === activeSessionId) return fileAttention;
-    if (surfaceFocus === 'skills' && repoPanelOpen) return panel('skills', 'panel:skills', 'Skills 与 Prompts', activeSession?.workingDir || '全局资源库',
-      '当前正在浏览或编辑 Skills 与 Prompts。具体编辑内容可通过当前编辑器或提问附件补充。');
     if (surfaceFocus === 'assets' && assetPanelOpen) return panel('assets', 'panel:asset-pool', '素材池', '当前 Session 可用素材',
       '当前正在浏览素材池。素材正文与二进制不会被自动批量注入。');
     if (surfaceFocus === 'notes' && scratchPadOpen) return panel('notes', 'panel:scratch-pad', '便签本', '待办与随手记录',
@@ -665,7 +729,7 @@ export const App: React.FC = () => {
     activeSession, activeSessionId, sessions, backendManagerOpen, backendManagerExecKey,
     activeExecBackends, releaseCenterOpen, settingsOpen, currentUser.displayName, config,
     connPanelOpen, logViewerOpen, manualPanelOpen, newSessionDialogOpen, dataPicker,
-    fileAttention, surfaceFocus, repoPanelOpen, assetPanelOpen, scratchPadOpen,
+    fileAttention, surfaceFocus, repoPanelOpen, workbench.active, assetPanelOpen, scratchPadOpen,
   ]);
 
   const thoughtsSnapshotRef = useRef({ attention: currentAttention, sessionId: activeSessionId || '' });
@@ -828,7 +892,7 @@ export const App: React.FC = () => {
           return next;
         });
         // 如果完成的是后台 session（非当前活跃），标记为"已完成待查看"
-        if (sid !== activeSessionIdRef.current) {
+        if (sid !== visibleSessionIdRef.current) {
           setCompletedSessions((prev) => {
             const next = new Set(prev);
             next.add(sid);
@@ -865,7 +929,7 @@ export const App: React.FC = () => {
       }
     });
     return unsub;
-  }, [activeSessionIdRef]);
+  }, []);
 
   // 自动滚动 / 跟踪最新 / 滚动事件全部下沉到 ChatPane 内部 ——
   // 每个 pane 维护自己的 endRef / scrollContainerRef / autoScrollRef。
@@ -1117,6 +1181,7 @@ export const App: React.FC = () => {
       await refreshSessionList();
       // 把所有 pane 上指向已迁移 session 的位置一并替换为新 session id
       if (idMap.size > 0) {
+        dispatchWorkbench({ type: 'migrateSessions', ids: Object.fromEntries(idMap) });
         setPaneSessions((prev) => prev.map((s) => (s && idMap.has(s) ? idMap.get(s)! : s)));
       }
     }
@@ -1226,7 +1291,7 @@ export const App: React.FC = () => {
         : '0 18px 48px rgba(0,0,0,.38)',
       '--ui-surface-hover': isLightTheme ? 'rgba(22,119,255,.055)' : 'rgba(148,163,184,.055)',
     } as React.CSSProperties}>
-      {firstHomePaneIdx >= 0 && (
+      {firstHomePaneIdx >= 0 && chatWorkspaceVisible && (
         <a className="app-skip-link" href={`#home-dashboard-content-${firstHomePaneIdx}`}>
           跳到首页主要内容
         </a>
@@ -1242,6 +1307,7 @@ export const App: React.FC = () => {
       )}
       {/* ★ highlight.js theme - 随主题切换 */}
       <style>{hljsCss}</style>
+      <style>{uiDensityCss}</style>
       {/* ★ Markdown 内容样式 + 全局动画 */}
       <style>{`
         /* 移动端用 dvh，规避浏览器地址栏让 100vh 把底部输入框顶出可视区；
@@ -1301,7 +1367,7 @@ export const App: React.FC = () => {
         .message-bubble-wrapper:hover { box-shadow: var(--ui-shadow-float); }
         .awu-date-divider {
           display: flex; align-items: center; gap: 12px;
-          margin: 16px 20px 12px;
+          margin: var(--ui-space-lg, 16px) var(--ui-message-gutter, 20px) var(--ui-space-md, 12px);
           color: var(--theme-text-muted); font-size: 10.5px; font-weight: 600;
           letter-spacing: .035em; white-space: nowrap;
         }
@@ -1404,6 +1470,10 @@ export const App: React.FC = () => {
       )}
 
       <Sidebar
+        view={sidebarView}
+        onViewChange={setSidebarView}
+        activeWorkbenchTab={workbench.active}
+        onOpenExtension={openExtensionTab}
         isMobile={isMobile}
         activeSessionId={activeSessionId}
         onSelectSession={(id) => {
@@ -1429,12 +1499,11 @@ export const App: React.FC = () => {
         }}
         onNewSession={handleNewSession}
         onDeleteSession={(id) => {
+          closeWorkbenchTab(sessionWorkbenchTab(id));
           // session 被删后顺手把它在 streamStates Map 和历史缓存里的数据也
           // 清掉,防止「删而不洗」的内存泄漏。
           clearStreamStateForSession(id);
           clearSessionHistoryCache(id);
-          // 任何 pane 里指向已删除 session 的位置都置空
-          setPaneSessions((prev) => prev.map((s) => (s === id ? null : s)));
         }}
         streamingSessions={streamingSessions}
         completedSessions={completedSessions}
@@ -1467,7 +1536,7 @@ export const App: React.FC = () => {
         />
       )}
 
-      <div onPointerDown={() => setSurfaceFocus(activeSessionId ? 'session' : 'home')}
+      <div onPointerDown={() => setSurfaceFocus(chatWorkspaceVisible ? (activeSessionId ? 'session' : 'home') : 'skills')}
         style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         {/* ---- 顶部栏 ---- */}
         <div className="awu-topbar" style={isMobile ? { ...headerStyle, padding: '4px 8px', gap: 2, flexWrap: 'nowrap', alignItems: 'center' } : headerStyle}>
@@ -1676,7 +1745,8 @@ export const App: React.FC = () => {
                 }} />
                 <TopbarMenuItem icon="📦" label="Skills 与 Prompts" active={repoPanelOpen} onClick={() => {
                   setSurfaceFocus('skills');
-                  setRepoPanelOpen((open) => !open);
+                  dispatchWorkbench({ type: 'open', tab: 'library' });
+                  setSidebarView('extensions');
                   setMoreMenuOpen(false);
                 }} />
                 <TopbarMenuItem icon="🗂" label="素材池" active={assetPanelOpen} onClick={() => {
@@ -1717,19 +1787,21 @@ export const App: React.FC = () => {
 
         {/* ---- Claude 登录状态提示 ---- */}
 
-        {/* ---- Repo 面板（展开区域）---- */}
-        <div onPointerDown={() => setSurfaceFocus('skills')} style={{
-          maxHeight: repoPanelOpen ? (repoPanelEditing ? 'calc(100vh - 160px)' : 400) : 0,
-          overflow: repoPanelEditing ? 'auto' : 'hidden',
-          transition: repoPanelEditing ? 'none' : 'max-height 0.3s cubic-bezier(0.22,0.61,0.36,1)',
-        }}>
-          <RepoPanel
-            open={repoPanelOpen}
-            workingDir={activeSession?.workingDir || ''}
-            onClose={() => setRepoPanelOpen(false)}
-            onEditingChange={setRepoPanelEditing}
-          />
-        </div>
+        <WorkbenchTabs state={workbench} editing={repoPanelEditing} sessions={sessions}
+          streamingSessions={streamingSessions} completedSessions={completedSessions}
+          onSelect={selectWorkbenchTab} onClose={closeWorkbenchTab} />
+        {workbench.tabs.includes('library') && <section id="workbench-panel-library" role="tabpanel" aria-labelledby="workbench-tab-library"
+          hidden={workbench.active !== 'library'} style={{ display: workbench.active === 'library' ? 'flex' : 'none', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <RepoPanel open embedded revision={skillLibraryRevision} workingDir={activeSession?.workingDir || ''}
+            onClose={() => closeWorkbenchTab('library')} onEditingChange={setRepoPanelEditing}
+            onOpenMarket={() => dispatchWorkbench({ type: 'open', tab: 'market' })} />
+        </section>}
+        {workbench.tabs.includes('market') && <section id="workbench-panel-market" role="tabpanel" aria-labelledby="workbench-tab-market"
+          hidden={workbench.active !== 'market'} style={{ display: workbench.active === 'market' ? 'flex' : 'none', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <SkillMarketDialog open embedded onClose={() => closeWorkbenchTab('market')}
+            onInstalled={name => { setSkillLibraryRevision(value => value + 1); if (name) setMarketRuntimeNames([name]); }} />
+        </section>}
+        {marketRuntimeNames.length > 0 && <SkillRuntimeDialog names={marketRuntimeNames} onClose={() => setMarketRuntimeNames([])} />}
 
         {/* ---- 分屏布局:1×1 / 1×2 / 2×2 ---- *
          * 每个 ChatPane 内部独立 useChat,有自己的消息流、滚动、权限气泡和 ChatInput。
@@ -1739,10 +1811,14 @@ export const App: React.FC = () => {
           const slotCount = LAYOUT_SLOTS[layout];
           const gridCols = layout === '2x2' ? '1fr 1fr' : layout === '1x2' ? '1fr 1fr' : '1fr';
           const gridRows = layout === '2x2' ? '1fr 1fr' : '1fr';
+          const openedSessionIds = [...new Set([
+            ...workbench.tabs.map(workbenchSessionId), ...paneSessions,
+          ].filter((id): id is string => !!id))];
+          const columnCount = layout === '1x1' ? 1 : 2;
           return (
-            <div style={{
+            <div id="workbench-panel-chat" role="tabpanel" aria-labelledby={`workbench-tab-${chatWorkspaceVisible ? workbench.active : 'chat'}`} hidden={!chatWorkspaceVisible} style={{
               flex: 1,
-              display: 'grid',
+              display: chatWorkspaceVisible ? 'grid' : 'none',
               gridTemplateColumns: gridCols,
               gridTemplateRows: gridRows,
               gap: 1,
@@ -1750,14 +1826,20 @@ export const App: React.FC = () => {
               minHeight: 0,
               background: 'var(--theme-border)',
             }}>
-              {Array.from({ length: slotCount }).map((_, idx) => (
-                paneSessions[idx] ? (
+              {openedSessionIds.map(sid => {
+                const idx = paneSessions.indexOf(sid);
+                const placed = idx >= 0 && idx < slotCount;
+                return <div key={sid} data-session-tab-panel={sid} hidden={!placed}
+                  style={{ display: placed ? 'flex' : 'none', minWidth: 0, minHeight: 0, overflow: 'hidden',
+                    gridColumn: placed ? idx % columnCount + 1 : undefined,
+                    gridRow: placed ? Math.floor(idx / columnCount) + 1 : undefined }}>
+                  <AppModalVisibilityContext.Provider value={chatWorkspaceVisible && placed}>
                   <ChatPane
-                    key={idx}
                     paneId={idx}
-                    sessionId={paneSessions[idx]}
-                    isFocused={focusedPaneIdx === idx}
-                    onFocus={() => setFocusedPaneIdx(idx)}
+                    sessionId={sid}
+                    isVisible={chatWorkspaceVisible && placed}
+                    isFocused={chatWorkspaceVisible && placed && focusedPaneIdx === idx}
+                    onFocus={() => { if (placed) setSessionInPane(sid, idx); }}
                     backends={backends}
                     config={config}
                     currentUser={currentUser}
@@ -1765,13 +1847,13 @@ export const App: React.FC = () => {
                     isMobile={isMobile}
                     onRequestNewSession={handleNewSession}
                     onSessionDeleted={(sid) => {
-                      setPaneSessions((prev) => prev.map((s) => (s === sid ? null : s)));
+                      closeWorkbenchTab(sessionWorkbenchTab(sid));
                     }}
                     onStreamingChange={handleStreamingChange}
                     onGhostStateChange={handleGhostStateChange}
                     onAdjustFontSize={(delta) => updateConfig({ fontSize: Math.max(11, Math.min(28, config.fontSize + delta)) })}
                     onRequestFileFocus={(request) => {
-                      setFocusedPaneIdx(idx);
+                      setSessionInPane(sid, idx >= 0 ? idx : undefined);
                       setSidebarCollapsed(false);
                       setFileFocusRequest({
                         ...request,
@@ -1779,7 +1861,14 @@ export const App: React.FC = () => {
                       });
                     }}
                   />
-                ) : idx === firstHomePaneIdx ? (
+                  </AppModalVisibilityContext.Provider>
+                </div>;
+              })}
+              {Array.from({ length: slotCount }).map((_, idx) => paneSessions[idx] ? null : (
+                <div key={`empty-slot-${idx}`} onPointerDown={() => {
+                  setFocusedPaneIdx(idx); dispatchWorkbench({ type: 'open', tab: 'chat' });
+                }} style={{ display: 'contents' }}>
+                {idx === firstHomePaneIdx ? (
                   <HomeDashboard
                     key={`home-${idx}`}
                     contentId={`home-dashboard-content-${idx}`}
@@ -1813,7 +1902,8 @@ export const App: React.FC = () => {
                       ＋ 在此窗格新建会话
                     </button>
                   </section>
-                )
+                )}
+                </div>
               ))}
             </div>
           );
@@ -2067,12 +2157,12 @@ const headerStyle: React.CSSProperties = {
   position: 'relative',
   zIndex: 500,
   isolation: 'isolate',
-  minHeight: 48,
-  padding: '8px 14px',
+  minHeight: 'var(--ui-header-height, 48px)',
+  padding: 'var(--ui-header-padding, 8px 14px)',
   borderBottom: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   display: 'flex',
   alignItems: 'center',
-  gap: 10,
+  gap: 'var(--ui-space-sm, 10px)',
   background: 'var(--theme-panel-bg, var(--theme-bg, #ffffff))',
   overflow: 'visible',
 };
@@ -2305,7 +2395,7 @@ const dialogStyle: React.CSSProperties = {
   background: 'var(--theme-bg-secondary, #ffffff)',
   border: '1px solid var(--theme-border, rgba(0,0,0,0.15))',
   borderRadius: 8,
-  padding: 24,
+  padding: 'var(--ui-space-xl, 24px)',
   width: '90%',
   maxWidth: 480,
   maxHeight: 'calc(100dvh - 32px)',
@@ -2323,7 +2413,7 @@ const dialogTitleStyle: React.CSSProperties = {
 };
 
 const dialogDescStyle: React.CSSProperties = {
-  margin: '0 0 20px 0',
+  margin: '0 0 var(--ui-space-lg, 20px) 0',
   fontSize: 13,
   color: 'var(--theme-text-muted, #656d76)',
   lineHeight: 1.5,
@@ -2339,7 +2429,7 @@ const labelStyle: React.CSSProperties = {
 
 const selectStyle: React.CSSProperties = {
   width: '100%',
-  padding: '8px 10px',
+  padding: 'var(--ui-field-padding, 8px 10px)',
   background: 'var(--theme-input-bg, #ffffff)',
   border: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   borderRadius: 6,
@@ -2352,7 +2442,7 @@ const dialogActionsStyle: React.CSSProperties = {
   display: 'flex',
   gap: 8,
   justifyContent: 'flex-end',
-  marginTop: 20,
+  marginTop: 'var(--ui-space-lg, 20px)',
 };
 
 /* ---- New Session Dialog: Select working directory first ---- */
@@ -2361,7 +2451,7 @@ const selectWrapperStyle: React.CSSProperties = {
 };
 
 const cancelBtnStyle: React.CSSProperties = {
-  padding: '8px 16px',
+  padding: 'var(--ui-space-sm, 8px) var(--ui-space-lg, 16px)',
   background: 'var(--theme-bg-tertiary, #f6f8fa)',
   border: '1px solid var(--theme-border, rgba(0,0,0,0.15))',
   color: 'var(--theme-text, #1f2328)',
@@ -2371,7 +2461,7 @@ const cancelBtnStyle: React.CSSProperties = {
 };
 
 const confirmBtnStyle: React.CSSProperties = {
-  padding: '8px 16px',
+  padding: 'var(--ui-space-sm, 8px) var(--ui-space-lg, 16px)',
   background: 'var(--theme-accent, #0969da)',
   border: 'none',
   color: '#fff',
@@ -2909,12 +2999,12 @@ const NewSessionDialog: React.FC<NewSessionDialogProps> = ({
 };
 
 const formGroupStyle: React.CSSProperties = {
-  marginBottom: 16,
+  marginBottom: 'var(--ui-space-lg, 16px)',
 };
 
 const inputStyle: React.CSSProperties = {
   flex: 1,
-  padding: '10px 12px',
+  padding: 'var(--ui-field-padding, 10px 12px)',
   background: 'var(--theme-input-bg, #ffffff)',
   border: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   borderRadius: 8,

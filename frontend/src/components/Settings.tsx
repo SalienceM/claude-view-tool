@@ -1803,12 +1803,12 @@ const panelStyle: React.CSSProperties = {
   boxSizing: 'border-box',
 };
 const settingsHeaderStyle: React.CSSProperties = {
-  height: 62,
-  flex: '0 0 62px',
+  height: 'var(--ui-panel-header-height, 62px)',
+  flex: '0 0 var(--ui-panel-header-height, 62px)',
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'center',
-  padding: '0 18px 0 20px',
+  padding: '0 var(--ui-space-lg, 18px) 0 var(--ui-space-lg, 20px)',
   borderBottom: '1px solid var(--theme-border)',
   background: 'var(--theme-bg-secondary)',
   boxSizing: 'border-box',
@@ -1822,7 +1822,7 @@ const settingsBodyStyle: React.CSSProperties = {
 const settingsNavStyle: React.CSSProperties = {
   flex: '0 0 clamp(118px, 21vw, 178px)',
   minWidth: 0,
-  padding: '12px 8px',
+  padding: 'var(--ui-space-md, 12px) var(--ui-space-sm, 8px)',
   borderRight: '1px solid var(--theme-border)',
   background: 'var(--theme-bg-secondary)',
   overflowY: 'auto',
@@ -1830,11 +1830,11 @@ const settingsNavStyle: React.CSSProperties = {
 };
 const settingsNavButtonStyle: React.CSSProperties = {
   width: '100%',
-  minHeight: 48,
+  minHeight: 'var(--ui-group-height, 48px)',
   display: 'flex',
   alignItems: 'flex-start',
   gap: 7,
-  padding: '8px 8px 8px 7px',
+  padding: 'var(--ui-space-sm, 8px) 8px var(--ui-space-sm, 8px) 7px',
   marginBottom: 3,
   border: 'none',
   borderLeft: '2px solid transparent',
@@ -1856,12 +1856,12 @@ const settingsContentStyle: React.CSSProperties = {
   minWidth: 0,
   overflowY: 'auto',
   overscrollBehavior: 'contain',
-  padding: '20px clamp(14px, 3vw, 26px) 28px',
+  padding: 'var(--ui-settings-content-padding, 20px clamp(14px, 3vw, 26px) 28px)',
   boxSizing: 'border-box',
 };
 const settingsPageHeaderStyle: React.CSSProperties = {
-  marginBottom: 16,
-  paddingBottom: 13,
+  marginBottom: 'var(--ui-space-lg, 16px)',
+  paddingBottom: 'var(--ui-space-md, 13px)',
   borderBottom: '1px solid var(--theme-border)',
 };
 const closeBtnStyle: React.CSSProperties = {
@@ -1870,8 +1870,8 @@ const closeBtnStyle: React.CSSProperties = {
   fontSize: 18, cursor: 'pointer', padding: '4px 8px',
 };
 const sectionStyle: React.CSSProperties = {
-  marginBottom: 12,
-  padding: 14,
+  marginBottom: 'var(--ui-space-md, 12px)',
+  padding: 'var(--ui-section-padding, 14px)',
   border: '1px solid var(--theme-border)',
   borderRadius: 5,
   background: 'color-mix(in srgb, var(--theme-bg-secondary) 74%, transparent)',

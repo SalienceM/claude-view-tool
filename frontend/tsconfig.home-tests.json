@@ -11,6 +11,8 @@
     "outDir": ".home-test-dist"
   },
   "include": [
+    "src/utils/workbench.ts",
+    "src/utils/skillMarketView.ts",
     "src/home/dashboardModel.ts",
     "src/home/dashboardPerformance.ts",
     "src/home/dashboardPreferences.ts",

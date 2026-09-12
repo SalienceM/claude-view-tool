@@ -306,6 +306,8 @@ class SkillMarketTests(unittest.TestCase):
         })
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "api.github.com":
+                return httpx.Response(403, json={"message": "rate limited"}, request=request)
             self.assertEqual(request.url.host, "codeload.github.com")
             return httpx.Response(200, content=archive, request=request)
 
@@ -373,6 +375,47 @@ class SkillMarketTests(unittest.TestCase):
         self.assertEqual(catalog["sources"][0]["skillCount"], 1)
         self.assertEqual(catalog["sources"][0]["skippedCount"], 1)
         self.assertIn("description", catalog["sources"][0]["issues"][0]["message"])
+
+    def test_repository_metadata_is_cached_separate_from_skill_version(self):
+        archive = make_zip({"skills-main/portable-demo/SKILL.md": STANDARD_MD.replace(
+            "license: MIT", "license: MIT\nmetadata:\n  version: 1.2.3",
+        )})
+        requests = []
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            if request.url.host == "codeload.github.com":
+                return httpx.Response(200, content=archive)
+            if request.url.path.endswith("/releases/latest"):
+                return httpx.Response(200, json={"tag_name": "repo-v9", "published_at": "2026-09-01T00:00:00Z"})
+            return httpx.Response(200, json={"stargazers_count": 1234, "pushed_at": "2026-09-10T00:00:00Z", "archived": False})
+        with tempfile.TemporaryDirectory() as tmp, patch("src.backend.skill_market.DEFAULT_SOURCES", []):
+            market = SkillMarket(SkillStore(), data_dir=Path(tmp), transport=httpx.MockTransport(handler))
+            market.add_source("example/skills")
+            first = asyncio.run(market.list_catalog())
+            second = asyncio.run(market.list_catalog())
+            self.assertEqual(len(requests), 3)
+            item = first["items"][0]
+            self.assertEqual(item["version"], "1.2.3")
+            self.assertEqual(item["repositoryInfo"]["latestRelease"], "repo-v9")
+            self.assertEqual(item["repositoryInfo"]["stars"], 1234)
+            self.assertEqual(item["digest"], second["items"][0]["digest"])
+            asyncio.run(market.list_catalog(force=True))
+            self.assertEqual(len(requests), 6)
+
+    def test_metadata_failure_does_not_hide_catalog_or_invent_zero_stars(self):
+        archive = make_zip({"skills-main/portable-demo/SKILL.md": STANDARD_MD})
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "codeload.github.com":
+                return httpx.Response(200, content=archive)
+            return httpx.Response(403, json={"message": "rate limited"})
+        with tempfile.TemporaryDirectory() as tmp, patch("src.backend.skill_market.DEFAULT_SOURCES", []):
+            market = SkillMarket(SkillStore(), data_dir=Path(tmp), transport=httpx.MockTransport(handler))
+            market.add_source("example/skills")
+            result = asyncio.run(market.list_catalog())
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["items"][0]["version"], "")
+        self.assertNotIn("stars", result["items"][0]["repositoryInfo"])
+        self.assertIn("不影响安装", result["items"][0]["repositoryInfo"]["error"])
 
 
 if __name__ == "__main__":

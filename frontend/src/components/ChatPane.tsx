@@ -125,6 +125,7 @@ export interface ChatPaneProps {
   paneId: number;                           // 0/1/2/3, 用于 React key
   sessionId: string | null;                 // null = 空 pane
   isFocused: boolean;                       // 是否当前焦点 pane
+  isVisible?: boolean;                      // Tab 隐藏时保留实例，但不能改写不可见容器的滚动位置
   onFocus: () => void;                      // 点击 pane 时调用
   backends: any[];                          // 共享 backends 列表
   config: AppConfig;                        // 共享配置(fontSize, renderMarkdown)
@@ -151,6 +152,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   paneId,
   sessionId,
   isFocused,
+  isVisible = true,
   onFocus,
   backends,
   config,
@@ -519,8 +521,9 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
     content: string,
     images?: any[],
     textAttachments?: TextAttachment[],
+    kitApprovalDelegation?: boolean,
   ) => {
-    return sendMessageRef.current(content, images, textAttachments);
+    return sendMessageRef.current(content, images, textAttachments, kitApprovalDelegation);
   }, []); // ★ 通过 ref 调用，无需依赖 chat
 
   // 模型忙碌时 ChatInput 会把后续输入送到这里；无需显式开启模式。
@@ -688,6 +691,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
 
   // ── 自动滚到底部 ──
   useLayoutEffect(() => {
+    if (!isVisible) return;
     const switched = prevSessionRef.current !== sessionId;
     prevSessionRef.current = sessionId;
     if (switched) {
@@ -699,7 +703,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
     else endRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
-  }, [chat.messages, chat.hydratedSessionId, sessionId]);
+  }, [chat.messages, chat.hydratedSessionId, sessionId, isVisible]);
 
   // ── 新交互开始时重置跟踪 ──
   useEffect(() => {
@@ -712,6 +716,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
 
   // ── 滚动事件:用户向上滚则暂停跟踪 ──
   const handleScroll = useCallback(() => {
+    if (!isVisible) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
@@ -726,7 +731,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         setShowScrollBtn(true);
       }
     }
-  }, []);
+  }, [isVisible]);
 
   const scrollToBottom = useCallback(() => {
     autoScrollRef.current = true;
@@ -796,6 +801,13 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         <LoopPanel
           sessionId={sessionId}
           embedded
+          headerActions={config.workspaceKitsEnabled ? (
+            <button
+              onClick={() => setWorkspaceKitsOpen(true)}
+              title="Workspace Kits · Session 标准配件（实验）"
+              style={{ ...kitFab, position: 'static', flexShrink: 0 }}
+            >🧰</button>
+          ) : undefined}
           sessionBackendId={activeBackendId}
           sessionRuntime={{
             model: activeSession?.modelOverride,
@@ -807,11 +819,6 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
         />
         {config.workspaceKitsEnabled && (
           <>
-            <button
-              onClick={() => setWorkspaceKitsOpen(true)}
-              title="Workspace Kits · Session 标准配件（实验）"
-              style={kitFab}
-            >🧰</button>
             <WorkspaceKitsPanel
               sessionId={sessionId}
               open={workspaceKitsOpen}

@@ -103,6 +103,9 @@ export interface WorkspaceKit {
   implementationSummary: string;
   generationWarnings: string[];
   generatedByAi: boolean;
+  chatChain?: boolean;
+  optimizationRunning?: boolean;
+  optimizationRevision?: string;
   executionTarget: KitExecutionTarget;
   steps: KitStepSpec[];
   command: string;
@@ -204,6 +207,7 @@ export interface KitAssertionResult {
 export interface KitRun {
   id: string;
   kitId: string;
+  canonicalKitId?: string;
   sessionId: string;
   trigger: string;
   owner: string;
@@ -219,6 +223,7 @@ export interface KitRun {
   steps: KitStepRun[];
   currentStep: number;
   artifactIds: string[];
+  approvalDelegation?: { id: string; actor: string; messageId: string; issuedAt: number; expiresAt: number };
   error: string;
   startedAt?: number | null;
   endedAt?: number | null;
@@ -277,6 +282,10 @@ export interface KitCapabilityRuntime {
   };
   approval?: {
     approved: boolean;
+    source?: 'human' | 'chat-delegated';
+    delegationId?: string;
+    userMessageId?: string;
+    requestId?: string;
     actor?: string;
     at?: number;
     planId?: string;

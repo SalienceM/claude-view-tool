@@ -856,6 +856,7 @@ export function useChat(
         | 'realtime-voice'
         | 'realtime-voice-foreground'
         | 'realtime-voice-background',
+      kitApprovalDelegation: boolean = false,
     ) => {
       if (isStreamingRef.current) return;
 
@@ -910,6 +911,7 @@ export function useChat(
         skipPermissions: skipPermissionsRef.current,
         deliveryMode,
         interactionMode,
+        kitApprovalDelegation,
       });
     },
     [sessionId, backendId]
@@ -1220,6 +1222,7 @@ export function useChat(
       content: string,
       images?: ImageAttachment[],
       textAttachments?: TextAttachment[],
+      kitApprovalDelegation: boolean = false,
     ) => {
       if (
         !content.trim()
@@ -1228,6 +1231,10 @@ export function useChat(
       ) return;
 
       if (isStreamingRef.current) {
+        if (kitApprovalDelegation) {
+          addSystemMessage('本次 Kit 委托未发送：当前轮仍在执行，请结束后重新勾选并发送。');
+          return;
+        }
         // ★ 流式进行中：斜杠命令不中断，普通消息入队并中止当前响应
         if (content.trim().startsWith('/') && !textAttachments?.length) return;
         pendingMessageRef.current = { content, images, textAttachments };
@@ -1241,9 +1248,9 @@ export function useChat(
         return;
       }
 
-      doSend(content, images, textAttachments);
+      doSend(content, images, textAttachments, undefined, undefined, kitApprovalDelegation);
     },
-    [doSend, handleCommand, sessionId]
+    [doSend, handleCommand, sessionId, addSystemMessage]
   );
 
   const abort = useCallback(() => {

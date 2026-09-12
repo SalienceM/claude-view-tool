@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../api';
+import { api, getCurrentUserProfile, onExecStatus } from '../api';
 import type {
   WorkspaceKitState,
   WorkspaceKit,
@@ -76,7 +76,7 @@ function lastRunOf(state: WorkspaceKitState, kit: WorkspaceKit): KitRun | undefi
     const exact = state.runs.find((run) => run.id === kit.lastRunId);
     if (exact) return exact;
   }
-  return [...state.runs].reverse().find((run) => run.kitId === kit.id);
+  return [...state.runs].reverse().find((run) => (run.canonicalKitId || run.kitId) === kit.id);
 }
 
 function asDisplay(value: unknown): string {
@@ -182,6 +182,21 @@ function persistDismissedGeneration(sessionId: string, jobId: string): void {
     if (jobId) window.localStorage.setItem(generationDismissKey(sessionId), jobId);
     else window.localStorage.removeItem(generationDismissKey(sessionId));
   } catch { /* 隐私模式或受限 WebView 下仍允许本次关闭 */ }
+}
+
+type OptimizerDraft = { prompt: string; backendId?: string };
+const optimizerDraftFallback = new Map<string, OptimizerDraft>();
+function readOptimizerDraft(key: string): OptimizerDraft {
+  try {
+    const draft = JSON.parse(window.sessionStorage.getItem(key) || 'null');
+    if (draft && typeof draft.prompt === 'string') return draft;
+  } catch { /* 限制存储时退回本窗口内存，不阻塞编辑。 */ }
+  return optimizerDraftFallback.get(key) || { prompt: '' };
+}
+function writeOptimizerDraft(key: string, draft: OptimizerDraft): void {
+  optimizerDraftFallback.set(key, draft);
+  if (optimizerDraftFallback.size > 100) optimizerDraftFallback.delete(optimizerDraftFallback.keys().next().value!);
+  try { window.sessionStorage.setItem(key, JSON.stringify(draft)); } catch { /* 仍保留内存草稿。 */ }
 }
 
 function draftFromGenerationJob(job: KitGenerationJob): Draft {
@@ -447,7 +462,7 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
   const optimizerKit = state.kits.find((kit) => kit.id === optimizerKitId);
   const lastRun = selected ? lastRunOf(state, selected) : undefined;
   const selectedRuns = useMemo(
-    () => state.runs.filter((run) => run.kitId === selectedId).slice(-12).reverse(),
+    () => state.runs.filter((run) => (run.canonicalKitId || run.kitId) === selectedId).slice(-12).reverse(),
     [state.runs, selectedId],
   );
 
@@ -631,9 +646,7 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
   };
 
   return (
-    <div className="awu-kits-overlay" style={overlayStyle} onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
+    <div className="awu-kits-overlay" style={overlayStyle}>
       <style>{`
         @media (max-width: 680px) {
           .awu-kits-overlay { position: fixed !important; z-index: 1400 !important; }
@@ -649,6 +662,14 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
           .awu-kit-detail-heading { flex-direction: column; }
           .awu-kit-detail-badges, .awu-kits-list-toolbar { flex-wrap: wrap; }
           .awu-kit-detail-actions { justify-content: flex-start !important; }
+          .awu-kit-optimizer-header { flex-direction: column; align-items: stretch !important; gap: 8px !important; padding: 10px 12px !important; flex-shrink: 0; }
+          .awu-kit-optimizer-heading { flex-wrap: wrap; }
+          .awu-kit-optimizer-heading > span { white-space: nowrap; }
+          .awu-kit-optimizer-actions select { flex: 1; width: 0 !important; min-width: 0; }
+          .awu-kit-optimizer-actions button { flex-shrink: 0; min-width: 40px; }
+          .awu-kit-optimizer-version-bar { flex-wrap: wrap; flex-shrink: 0; gap: 6px !important; }
+          .awu-kit-optimizer-composer { flex-direction: column; align-items: stretch !important; flex-shrink: 0; }
+          .awu-kit-optimizer-composer button { white-space: nowrap; }
         }
       `}</style>
       <div className="awu-kits-panel" style={panelStyle} onMouseDown={(event) => event.stopPropagation()}>
@@ -895,6 +916,7 @@ export const WorkspaceKitsPanel: React.FC<Props> = ({ sessionId, open, onClose }
       </div>
       {optimizerKit && (
         <KitOptimizerPanel
+          key={`${getCurrentUserProfile().userId}:${sessionId}:${optimizerKit.id}`}
           sessionId={sessionId}
           kit={optimizerKit}
           running={isActiveRun(lastRunOf(state, optimizerKit))}
@@ -1641,6 +1663,11 @@ const CapabilityRunCard: React.FC<{
         </div>
       )}
 
+      {run.approvalDelegation?.id && <div style={{ ...subtleStyle, marginTop: 8 }}>
+        本次运行已获用户委托 · 到期 {new Date(run.approvalDelegation.expiresAt * 1000).toLocaleString()}
+        {runtime.approval?.source === 'chat-delegated' ? ' · 已由 Agent 核对并代确认' : ' · 尚需 Agent 核对计划或手动确认'}
+      </div>}
+
       {artifacts.length > 0 && (
         <div style={{ display: 'grid', gap: 5, marginTop: 10 }}>
           {artifacts.map((artifact, index) => (
@@ -1689,7 +1716,7 @@ const CapabilityRunCard: React.FC<{
       {waiting && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 13, flexWrap: 'wrap' }}>
           <div style={{ color: '#f0b429', fontSize: 11.5 }}>
-            确认后会上传以上制品并切换 channel manifest；AI 与 Schedule 无权代替你确认。
+            确认后会上传以上制品并切换 channel manifest；Agent 仅可使用本次有效委托代确认，Schedule 不会自动批准。
           </div>
           <div style={{ display: 'flex', gap: 7 }}>
             <button style={dangerButton} disabled={responding} onClick={() => onRespond(false)}>
@@ -2160,74 +2187,127 @@ const KitVersionsCard: React.FC<{
 const KitOptimizerPanel: React.FC<{
   sessionId: string; kit: WorkspaceKit; running: boolean; onClose: () => void;
 }> = ({ sessionId, kit, running, onClose }) => {
+  const draftKey = `agent-with-u:kit-optimizer:${JSON.stringify([getCurrentUserProfile().userId, sessionId, kit.id])}`;
+  const [initialDraft] = useState(() => readOptimizerDraft(draftKey));
   const [messages, setMessages] = useState<KitOptimizationMessage[]>([]);
   const [backends, setBackends] = useState<any[]>([]);
-  const [backendId, setBackendId] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [backendId, setBackendId] = useState(initialDraft.backendId || '');
+  const [prompt, setPrompt] = useState(initialDraft.prompt);
+  const [submitting, setSubmitting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const [notice, setNotice] = useState('');
   const [viewedProposal, setViewedProposal] = useState<KitOptimizationMessage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followMessagesRef = useRef(true);
+  const refreshRef = useRef<() => void>(() => {});
+  const revisionRef = useRef(0);
+  const generatingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const backendChosenRef = useRef(initialDraft.backendId !== undefined);
+  const busy = loading || !historyLoaded || submitting || saving || generating;
   const activeVersion = (kit.versions || []).find((version) => (
     version.isActive || version.id === kit.activeVersionId
   ));
 
   useEffect(() => {
     let cancelled = false;
-    setMessages([]); setNotice(''); setViewedProposal(null);
-    Promise.all([api.kitOptimizeGet(sessionId, kit.id), api.getSessionBackends(sessionId)]).then(([history, available]) => {
+    let inFlight = false;
+    let refreshAgain = false;
+    let observedRevision = '';
+    mountedRef.current = true;
+    const refresh = async () => {
       if (cancelled) return;
-      if (history && history.status === 'ok') {
+      if (inFlight) { refreshAgain = true; return; }
+      inFlight = true;
+      const revision = revisionRef.current;
+      try {
+        const history = await api.kitOptimizeGet(sessionId, kit.id);
+        if (cancelled || revision !== revisionRef.current) return;
+        if (history.status !== 'ok') throw new Error(history.message || '执行端没有返回 Kit 优化状态');
         setMessages(history.messages || []);
-        setBackendId(history.backendId || '');
-      } else {
-        setNotice(history?.message || '执行端没有返回 Kit 优化状态，请更新并重启执行端');
+        generatingRef.current = !!history.running || !!history.messages?.some(item => item.status === 'answering');
+        setGenerating(generatingRef.current);
+        if (!backendChosenRef.current) setBackendId(history.backendId || '');
+        setHistoryLoaded(true);
+      } catch (error) {
+        if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          setLoading(false);
+          if (refreshAgain) { refreshAgain = false; void refresh(); }
+        }
       }
+    };
+    refreshRef.current = () => { void refresh(); };
+    void refresh();
+    // 历史加载不依赖 Backend 列表成功，避免后者延迟把已有对话显示成空白。
+    void api.getSessionBackends(sessionId).then(available => {
+      if (cancelled) return;
       setBackends(Array.isArray(available) ? available : []);
     }).catch((error) => {
       if (!cancelled) setNotice(error instanceof Error ? error.message : String(error));
     });
-    return () => { cancelled = true; };
+    const off = api.onKitUpdated(next => {
+      if (next.sessionId !== sessionId) return;
+      const updated = next.kits.find(item => item.id === kit.id);
+      if (!updated) return;
+      const revision = `${updated.optimizationRevision}:${updated.optimizationRunning}:${updated.optimizationMessageCount}:${updated.versions?.length}`;
+      if (revision !== observedRevision) { observedRevision = revision; void refresh(); }
+    });
+    const offConnection = onExecStatus(() => { void refresh(); });
+    const timer = window.setInterval(() => {
+      if (generatingRef.current && !document.hidden) void refresh();
+    }, 3000);
+    return () => {
+      cancelled = true; mountedRef.current = false; off(); offConnection(); window.clearInterval(timer);
+    };
   }, [sessionId, kit.id]);
 
+  const messageRevision = messages.map(item => `${item.id}:${item.status}:${item.finalizedVersionId}`).join('|');
   useEffect(() => {
     const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [messages, busy]);
+    if (node && followMessagesRef.current) node.scrollTop = node.scrollHeight;
+  }, [messageRevision, busy]);
 
   const ask = async () => {
     const text = prompt.trim();
     if (!text || busy) return;
-    setBusy(true); setNotice(''); setPrompt('');
-    const optimistic: KitOptimizationMessage = {
-      id: `local-${Date.now()}`, role: 'user', content: text, backendId,
-      status: 'done', warnings: [], blockingIssues: [], questions: [], ready: false, readinessVersion: 2,
-      baseVersionId: kit.activeVersionId || '', finalizedVersionId: '', createdAt: Date.now() / 1000,
-    };
-    setMessages((current) => [...current, optimistic]);
+    followMessagesRef.current = true;
+    setSubmitting(true); setNotice(''); revisionRef.current += 1;
     try {
-      const result = await api.kitOptimizeAsk(sessionId, kit.id, text, backendId);
-      if (!result) {
-        setNotice('执行端没有返回 Kit 优化结果，请更新并重启执行端');
-        return;
+      const result = await api.kitOptimizeStart(sessionId, kit.id, text, backendId);
+      if (!['ok', 'queued'].includes(result.status)) throw new Error(result.message || '提交优化失败');
+      if (mountedRef.current) {
+        if (result.messages) setMessages(result.messages);
+        generatingRef.current = result.running !== false;
+        setGenerating(generatingRef.current);
       }
-      if (result.messages) setMessages(result.messages);
-      if (result.status !== 'ok') {
-        setNotice(typeof result.message === 'string' ? result.message : (result.message?.content || 'AI 优化失败'));
+      // 只在服务端接受后清理已发送草稿；不覆盖提交期间新输入的补充。
+      if (readOptimizerDraft(draftKey).prompt.trim() === text) {
+        writeOptimizerDraft(draftKey, { prompt: '', backendId });
+        if (mountedRef.current) setPrompt(current => current.trim() === text ? '' : current);
       }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      if (mountedRef.current) setNotice(error instanceof Error ? error.message : String(error));
     } finally {
-      setBusy(false);
+      if (mountedRef.current) { setSubmitting(false); refreshRef.current(); }
     }
   };
 
   const finalize = async (message: KitOptimizationMessage) => {
-    setBusy(true); setNotice('');
-    const result = await api.kitOptimizeFinalize(
-      sessionId, kit.id, message.id, message.content.slice(0, 500), false,
-    );
-    setBusy(false);
+    setSaving(true); setNotice('');
+    let result;
+    try {
+      result = await api.kitOptimizeFinalize(sessionId, kit.id, message.id, message.content.slice(0, 500), false);
+    } catch (error) {
+      if (mountedRef.current) setNotice(error instanceof Error ? error.message : String(error));
+      return;
+    } finally { if (mountedRef.current) setSaving(false); }
+    if (!mountedRef.current) return;
     if (result.status !== 'ok' || !result.version) {
       setNotice(result.message || '保存候选版本失败');
       return;
@@ -2242,13 +2322,11 @@ const KitOptimizerPanel: React.FC<{
   };
 
   return (
-    <div style={optimizerOverlayStyle} onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
-      <section style={optimizerPanelStyle} onMouseDown={(event) => event.stopPropagation()}>
-        <header style={headerStyle}>
+    <div className="awu-kit-optimizer-overlay" style={optimizerOverlayStyle} onMouseDown={event => event.stopPropagation()}>
+      <section role="dialog" aria-label={`优化 Kit：${kit.title}`} style={optimizerPanelStyle}>
+        <header className="awu-kit-optimizer-header" style={headerStyle}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="awu-kit-optimizer-heading" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <strong>✨ 优化 · {kit.title}</strong>
               <span style={experimentBadge}>独立 AI 对话</span>
             </div>
@@ -2256,16 +2334,19 @@ const KitOptimizerPanel: React.FC<{
               当前执行 {activeVersion?.version || '—'} · AI 生成的 DSL 需要由你保存为候选版本
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <select style={{ ...inputStyle, width: 220 }} value={backendId} onChange={(event) => setBackendId(event.target.value)}>
+          <div className="awu-kit-optimizer-actions" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <select style={{ ...inputStyle, width: 220 }} aria-label="优化 Backend" value={backendId} onChange={(event) => {
+              backendChosenRef.current = true; setBackendId(event.target.value);
+              writeOptimizerDraft(draftKey, { prompt, backendId: event.target.value });
+            }}>
               <option value="">跟随 Session Backend</option>
               {backends.map((backend) => <option key={backend.id} value={backend.id}>{backend.label || backend.id}</option>)}
             </select>
-            <button style={iconButton} onClick={onClose}>×</button>
+            <button style={iconButton} aria-label="关闭优化窗口" title="关闭窗口，不会取消后台优化；再次打开可继续查看" onClick={onClose}>×</button>
           </div>
         </header>
 
-        <div style={optimizerVersionBarStyle}>
+        <div className="awu-kit-optimizer-version-bar" style={optimizerVersionBarStyle}>
           <div style={{ minWidth: 0 }}>
             <strong style={{ fontSize: 11.5 }}>Kit 版本库</strong>
             <div style={{ ...subtleStyle, marginTop: 3 }}>
@@ -2275,8 +2356,12 @@ const KitOptimizerPanel: React.FC<{
           <KitVersionPicker sessionId={sessionId} kit={kit} running={running} />
         </div>
 
-        <div ref={scrollRef} style={optimizerMessagesStyle}>
-          {messages.length === 0 && (
+        <div ref={scrollRef} style={optimizerMessagesStyle} onScroll={event => {
+          const node = event.currentTarget;
+          followMessagesRef.current = node.scrollHeight - node.clientHeight - node.scrollTop < 60;
+        }}>
+          {loading && <div role="status" style={optimizerEmptyStyle}>正在恢复优化对话…</div>}
+          {historyLoaded && !loading && !generating && messages.length === 0 && (
             <div style={optimizerEmptyStyle}>
               <strong>从当前生效 DSL 继续优化</strong>
               <span>例如：“把停止服务拆成定位 PID、关闭进程树、复核残留三个步骤，并强化不能误杀其他 Java 的判言。”</span>
@@ -2321,14 +2406,20 @@ const KitOptimizerPanel: React.FC<{
               )}
             </div>
           ))}
-          {busy && <div style={{ ...optimizerBubbleStyle, alignSelf: 'flex-start', color: '#d2a8ff' }}>AI 正在检查当前版本并生成候选…</div>}
+          {(generating || submitting) && <div role="status" style={{ ...optimizerBubbleStyle, alignSelf: 'flex-start', color: '#d2a8ff' }}>
+            {submitting ? '正在提交优化任务…' : 'AI 正在后台生成候选，关闭窗口不会中断；再次打开可查看进度和结果。'}
+          </div>}
         </div>
 
-        {notice && <div style={{ padding: '7px 14px', color: notice.includes('已保存') ? '#56d364' : '#e3b341', fontSize: 11.5 }}>{notice}</div>}
-        <footer style={optimizerComposerStyle}>
+        {notice && <div style={{ padding: '7px 14px', color: notice.includes('已保存') ? '#56d364' : '#e3b341', fontSize: 11.5 }}>
+          {notice} <button style={linkButton} onClick={() => refreshRef.current()}>刷新状态</button>
+        </div>}
+        <footer className="awu-kit-optimizer-composer" style={optimizerComposerStyle}>
           <textarea style={{ ...inputStyle, minHeight: 66, resize: 'vertical' }} value={prompt}
             placeholder="继续描述你不满意的地方、希望增加的步骤或更严格的成功标准…"
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => {
+              setPrompt(event.target.value); writeOptimizerDraft(draftKey, { prompt: event.target.value, backendId });
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void ask(); }
             }} />
@@ -2336,9 +2427,7 @@ const KitOptimizerPanel: React.FC<{
         </footer>
 
         {viewedProposal && (
-          <div style={dslOverlayStyle} onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setViewedProposal(null);
-          }}>
+          <div style={dslOverlayStyle}>
             <div style={dslDialogStyle} onMouseDown={(event) => event.stopPropagation()}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <strong style={{ fontSize: 13 }}>候选 Kit DSL</strong>
@@ -2442,7 +2531,7 @@ const panelStyle: React.CSSProperties = {
   borderLeft: '1px solid var(--theme-border)', boxShadow: '-10px 0 35px rgba(0,0,0,.28)',
 };
 const headerStyle: React.CSSProperties = {
-  minHeight: 60, padding: '10px 14px', boxSizing: 'border-box',
+  minHeight: 'var(--ui-panel-header-height, 60px)', padding: 'var(--ui-space-md, 10px) var(--ui-space-lg, 14px)', boxSizing: 'border-box',
   display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
   borderBottom: '1px solid var(--theme-border)',
 };
@@ -2453,11 +2542,11 @@ const sidebarStyle: React.CSSProperties = {
 };
 const mainStyle: React.CSSProperties = { flex: 1, minWidth: 0, minHeight: 0 };
 const compactListStyle: React.CSSProperties = {
-  flex: 1, minHeight: 0, overflow: 'auto', padding: 18, boxSizing: 'border-box',
+  flex: 1, minHeight: 0, overflow: 'auto', padding: 'var(--ui-space-lg, 18px)', boxSizing: 'border-box',
 };
 const compactListToolbar: React.CSSProperties = {
   display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
-  marginBottom: 14,
+  marginBottom: 'var(--ui-space-md, 14px)',
 };
 const compactKitGrid: React.CSSProperties = {
   display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))',
@@ -2466,12 +2555,12 @@ const compactKitGrid: React.CSSProperties = {
 const compactKitCard: React.CSSProperties = {
   border: '1px solid var(--theme-border, rgba(255,255,255,.12))',
   background: 'var(--theme-bg-secondary, rgba(255,255,255,.025))',
-  borderRadius: 10, padding: 13, minWidth: 0, minHeight: 248,
+  borderRadius: 10, padding: 'var(--ui-section-padding, 13px)', minWidth: 0, minHeight: 'var(--ui-kit-card-height, 248px)',
   display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
 };
 const compactKitFooter: React.CSSProperties = {
-  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 10,
-  marginTop: 'auto', paddingTop: 13,
+  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 'var(--ui-space-sm, 10px)',
+  marginTop: 'auto', paddingTop: 'var(--ui-space-md, 13px)',
 };
 const compactKitActions: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap',
@@ -2482,7 +2571,7 @@ const subtleStyle: React.CSSProperties = { fontSize: 11, color: 'var(--theme-tex
 const cardStyle: React.CSSProperties = {
   border: '1px solid var(--theme-border, rgba(255,255,255,.12))',
   background: 'var(--theme-bg-secondary, rgba(255,255,255,.025))',
-  borderRadius: 9, padding: 12, marginTop: 12,
+  borderRadius: 9, padding: 'var(--ui-section-padding, 12px)', marginTop: 'var(--ui-space-md, 12px)',
 };
 const experimentBadge: React.CSSProperties = {
   fontSize: 10, padding: '2px 6px', borderRadius: 9,

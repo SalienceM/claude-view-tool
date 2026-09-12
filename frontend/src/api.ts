@@ -467,7 +467,18 @@ export interface RelayUserProfile {
   managed: boolean;
 }
 
+export interface SkillRepositoryInfo {
+  stars?: number;
+  pushedAt?: string;
+  archived?: boolean;
+  latestRelease?: string;
+  releasePublishedAt?: string;
+  checkedAt?: number;
+  error?: string;
+}
+
 export interface SkillMarketSource {
+  repositoryInfo?: SkillRepositoryInfo;
   id: string;
   name: string;
   repository: string;
@@ -485,6 +496,8 @@ export interface SkillMarketSource {
 }
 
 export interface SkillMarketItem {
+  version?: string;
+  repositoryInfo?: SkillRepositoryInfo;
   id: string;
   name: string;
   description: string;
@@ -2763,7 +2776,7 @@ export const api = {
   },
   async kitOptimizeGet(sessionId: string, kitId: string): Promise<{
     status: string; backendId?: string; activeVersionId?: string; versions?: KitVersion[];
-    messages?: KitOptimizationMessage[]; message?: string;
+    messages?: KitOptimizationMessage[]; message?: string; running?: boolean;
   }> {
     const result = await call('kitOptimizeGet', sessionId, kitId);
     return parseRpcObject(result, {
@@ -2889,6 +2902,14 @@ export const api = {
     const result = await call('kitCapabilityRespond', sessionId, runId, stepId, approved);
     return parseRpcObject(result, {
       status: 'error', message: '执行端未响应能力确认请求，请检查连接后重试',
+    });
+  },
+  async kitOptimizeStart(sessionId: string, kitId: string, prompt: string, backendId = ''): Promise<{
+    status: string; running?: boolean; messages?: KitOptimizationMessage[]; message?: string;
+  }> {
+    const result = await call('kitOptimizeStart', sessionId, kitId, prompt, backendId);
+    return parseRpcObject(result, {
+      status: 'error', message: '执行端未响应后台优化接口，请更新并重启该 Session 所属执行端',
     });
   },
   onKitGenerationUpdated(cb: KitGenerationUpdatedCallback): () => void {

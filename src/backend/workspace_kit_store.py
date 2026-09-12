@@ -7,6 +7,7 @@ Kit 是附着在 Session 上的标准化微任务：它有明确输入、执行�
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 import time
@@ -37,6 +38,7 @@ KIT_GENERATION_STATUSES = {
 FINAL_KIT_GENERATION_STATUSES = {
     "succeeded", "needs_input", "error", "cancelled",
 }
+CHAT_CHAIN_DESCRIPTION = "由当前聊天提交的组合 Kit，按顺序执行，首个失败停止。"
 
 
 def _now() -> float:
@@ -196,6 +198,7 @@ class WorkspaceKit:
     implementation_summary: str = ""
     generation_warnings: list[str] = field(default_factory=list)
     generated_by_ai: bool = False
+    chat_chain: bool = False
     # executor 是 Session 所属执行节点；client 是当前 AgentWithU 桌面客户端。
     execution_target: str = "executor"
     # 新 Kit 使用结构化步骤。空列表表示兼容旧版 command 单步骤 Kit。
@@ -239,6 +242,7 @@ class WorkspaceKit:
             "implementationSummary": self.implementation_summary,
             "generationWarnings": self.generation_warnings,
             "generatedByAi": self.generated_by_ai,
+            "chatChain": self.chat_chain,
             "executionTarget": self.execution_target,
             "steps": self.steps,
             "command": self.command,
@@ -314,6 +318,7 @@ class WorkspaceKit:
                 if str(item).strip()
             ][:50],
             generated_by_ai=bool(data.get("generatedByAi", False)),
+            chat_chain=data.get("chatChain") is True,
             execution_target=execution_target,
             steps=_dict_list(data.get("steps")),
             command=_safe_text(data.get("command"), 100_000),
@@ -362,6 +367,26 @@ class WorkspaceKit:
         schedule["nextRunAt"] = None
         snapshot["schedule"] = schedule
         return _json_copy(snapshot)
+
+    def chat_chain_key(self) -> str:
+        """仅匹配聊天组合，按实际 DSL 判等，不用标题/自然语言相似度猜测功能。"""
+        legacy = self.title.startswith("Chat 顺序执行 · ") and self.description == CHAT_CHAIN_DESCRIPTION
+        if not (self.chat_chain or legacy) or len(self.steps) < 2:
+            return ""
+        if any(step.get("type") != "kit_call" or not step.get("kitId") for step in self.steps):
+            return ""
+        payload = self.implementation_snapshot()
+        for key in ("implementationSummary", "generationWarnings", "generatedByAi"):
+            payload.pop(key, None)
+        payload["steps"] = [
+            {**{key: value for key, value in step.items() if key not in {"id", "title", "inputs"}},
+             "inputs": step.get("inputs") or {}}
+            for step in self.steps
+        ]
+        payload.update(objective=self.objective, successCriteria=self.success_criteria,
+                       safetyConstraints=self.safety_constraints, references=self.references,
+                       controlMode=self.control_mode)
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def ensure_initial_version(self, source: str = "create") -> KitVersion:
         if self.versions:
@@ -551,6 +576,7 @@ class KitRun:
     steps: list[KitStepRun] = field(default_factory=list)
     current_step: int = 0
     artifact_ids: list[str] = field(default_factory=list)
+    approval_delegation: dict = field(default_factory=dict)
     error: str = ""
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
@@ -575,6 +601,7 @@ class KitRun:
             "steps": [item.to_dict() for item in self.steps],
             "currentStep": self.current_step,
             "artifactIds": self.artifact_ids,
+            **({"approvalDelegation": self.approval_delegation} if self.approval_delegation else {}),
             "error": self.error,
             "startedAt": self.started_at,
             "endedAt": self.ended_at,
@@ -618,6 +645,7 @@ class KitRun:
             steps=[KitStepRun.from_dict(x) for x in _dict_list(data.get("steps"))],
             current_step=current_step,
             artifact_ids=[str(x) for x in (data.get("artifactIds") or [])],
+            approval_delegation=dict(data.get("approvalDelegation") or {}),
             error=_safe_text(data.get("error"), 20_000),
             started_at=data.get("startedAt"),
             ended_at=data.get("endedAt"),
@@ -768,6 +796,8 @@ class WorkspaceKitState:
     runs: list[KitRun] = field(default_factory=list)
     artifacts: list[KitArtifact] = field(default_factory=list)
     generation_jobs: list[KitGenerationJob] = field(default_factory=list)
+    # 旧重复定义作为归档保留：只合并展示归属，绝不重写运行/版本/审批的历史标识。
+    chain_aliases: dict[str, str] = field(default_factory=dict)
     created_at: float = field(default_factory=_now)
     updated_at: float = field(default_factory=_now)
 
@@ -783,6 +813,7 @@ class WorkspaceKitState:
             "runs": [item.to_dict() for item in self.runs],
             "artifacts": [item.to_dict() for item in self.artifacts],
             "generationJobs": [item.to_dict() for item in self.generation_jobs],
+            "chainAliases": dict(self.chain_aliases),
             "dataMarket": list(latest.values()),
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -799,6 +830,7 @@ class WorkspaceKitState:
                 KitGenerationJob.from_dict(x)
                 for x in _dict_list(data.get("generationJobs"))
             ],
+            chain_aliases={str(key): str(value) for key, value in (data.get("chainAliases") or {}).items()},
             created_at=float(data.get("createdAt") or _now()),
             updated_at=float(data.get("updatedAt") or _now()),
         )
@@ -806,6 +838,47 @@ class WorkspaceKitState:
     def latest_artifact(self, key: str) -> Optional[KitArtifact]:
         matches = [item for item in self.artifacts if item.key == key]
         return max(matches, key=lambda item: item.created_at) if matches else None
+
+    def canonical_chain_id(self, kit_id: str) -> str:
+        seen: set[str] = set()
+        while kit_id in self.chain_aliases and kit_id not in seen:
+            seen.add(kit_id)
+            kit_id = self.chain_aliases[kit_id]
+        return kit_id
+
+    def visible_kits(self) -> list[WorkspaceKit]:
+        return [kit for kit in self.kits if kit.id not in self.chain_aliases]
+
+    def last_chain_run_id(self, kit: WorkspaceKit) -> str:
+        runs = [run for run in self.runs if self.canonical_chain_id(run.kit_id) == kit.id]
+        active = [run for run in runs if run.status not in FINAL_RUN_STATUSES]
+        return (active or runs)[-1].id if runs else kit.last_run_id
+
+    def reconcile_chat_chains(self, protected_ids: set[str] | None = None) -> bool:
+        """把未改造、已空闲的旧聊天重复链归档到最早定义，保留全部原始对象。"""
+        protected = set(protected_ids or ())
+        for run in self.runs:
+            if run.status not in FINAL_RUN_STATUSES:
+                protected.add(run.kit_id)
+                protected.update(step.source_kit_id for step in run.steps)
+        groups: dict[str, list[WorkspaceKit]] = {}
+        for kit in self.visible_kits():
+            key = kit.chat_chain_key()
+            if key:
+                groups.setdefault(key, []).append(kit)
+        changed = False
+        for group in groups.values():
+            if len(group) < 2 or any(
+                kit.id in protected or len(kit.versions) > 1 or kit.optimization_messages
+                for kit in group
+            ) or len({kit.enabled for kit in group}) != 1:
+                continue
+            canonical = min(group, key=lambda kit: (kit.created_at, kit.id))
+            for kit in group:
+                if kit.id != canonical.id:
+                    self.chain_aliases[kit.id] = canonical.id
+                    changed = True
+        return changed
 
     def compact(self) -> None:
         """限制 sidecar 增长；保留最近运行及每个数据键的近期版本。"""

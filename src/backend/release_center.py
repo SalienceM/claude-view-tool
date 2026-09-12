@@ -618,6 +618,10 @@ class ReleaseCenterManager:
             "message": "七牛账号已保存到当前节点的发布工作台专用 qshell 空间；密钥未写入普通配置",
         }
 
+    def approval_config_fingerprint(self) -> str:
+        """委托确认绑定发布配置，配置变化必须重新授权；不探测网络/账号。"""
+        return hashlib.sha256(canonical_payload(self._config())).hexdigest()
+
     def public_config(self) -> dict[str, Any]:
         config = self._config()
         qshell = self._resolve_qshell(config)

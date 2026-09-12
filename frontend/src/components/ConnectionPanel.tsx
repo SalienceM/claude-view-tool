@@ -942,7 +942,7 @@ const panelStyle: React.CSSProperties = {
   background: 'var(--theme-bg-secondary, #1f202e)',
   border: '1px solid var(--theme-border, rgba(255,255,255,0.1))',
   borderRadius: 12,
-  padding: 20,
+  padding: 'var(--ui-space-xl, 20px)',
   width: '90%',
   maxWidth: 460,
   maxHeight: '85vh',
@@ -958,8 +958,8 @@ const introStyle: React.CSSProperties = {
 const cardStyle: React.CSSProperties = {
   border: '1px solid var(--theme-border)',
   borderRadius: 10,
-  padding: 12,
-  marginBottom: 12,
+  padding: 'var(--ui-section-padding, 12px)',
+  marginBottom: 'var(--ui-space-md, 12px)',
   background: 'var(--theme-bg, rgba(255,255,255,0.02))',
 };
 

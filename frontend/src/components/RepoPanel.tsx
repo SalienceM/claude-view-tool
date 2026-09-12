@@ -32,6 +32,9 @@ interface PromptItem {
   isDefault?: boolean;
 }
 interface Props {
+  embedded?: boolean;
+  onOpenMarket?: () => void;
+  revision?: number;
   open: boolean;
   workingDir: string;
   onClose: () => void;
@@ -218,7 +221,7 @@ const SKILL_TYPE_PRESETS: SkillTypePreset[] = [
 // ═══════════════════════════════════════
 //  RepoPanel — Skill + Prompt 仓库面板
 // ═══════════════════════════════════════
-export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditingChange }) => {
+export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditingChange, embedded, onOpenMarket, revision }) => {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
   // 编辑状态
@@ -267,7 +270,7 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
 
   useEffect(() => {
     if (open) refresh();
-  }, [open, refresh]);
+  }, [open, refresh, revision]);
 
   useEffect(() => {
     onEditingChange?.(editingType !== null);
@@ -461,7 +464,7 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
   // 编辑器模式
   if (editingType) {
     return (
-      <div style={panelEditorStyle}>
+      <div style={{ ...panelEditorStyle, ...(embedded ? { flex: 1, minHeight: 0, maxHeight: 'none' } : {}) }}>
         <div style={editorWrapStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             {editingType === 'prompt' && (
@@ -582,15 +585,19 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
 
   // 卡片列表模式
   return (
-    <div style={panelStyle}>
-      <div style={{ display: 'flex', gap: 24, flex: 1, overflow: 'hidden' }}>
+    <div className={embedded ? 'repo-workbench' : undefined} style={{ ...panelStyle, ...(embedded ? { flex: 1, minHeight: 0 } : {}) }}>
+      <style>{`.repo-workbench .repo-cards { max-height:none!important; align-content:flex-start; }
+        @media(max-width:760px) { .repo-workbench .repo-columns { flex-direction:column; gap:16px!important; overflow:auto!important; }
+          .repo-workbench .repo-column { border:0!important; padding:0!important; flex:none!important; }
+          .repo-workbench .repo-cards { overflow:visible!important; } }`}</style>
+      <div className="repo-columns" style={{ display: 'flex', gap: 24, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {/* ── 左：Skills ── */}
-        <div style={{ ...columnStyle, borderRight: '1px solid var(--theme-border)', paddingRight: 24 }}>
+        <div className="repo-column" style={{ ...columnStyle, borderRight: '1px solid var(--theme-border)', paddingRight: 24 }}>
           <div style={{ ...columnHeaderStyle, border: 'none', padding: 0 }}>
             <span>⚡ Skills</span>
             <div style={{ display: 'flex', gap: 4 }}>
               <button
-                onClick={() => setShowSkillMarket(true)}
+                onClick={() => onOpenMarket ? onOpenMarket() : setShowSkillMarket(true)}
                 title="浏览并安装标准 Agent Skills"
                 style={{ ...addBtnStyle, fontSize: 11, padding: '2px 8px', width: 'auto' }}
               >🛍 市场</button>
@@ -598,13 +605,14 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
                 onClick={() => fileInputRef.current?.click()}
                 disabled={installing}
                 title="从 .awu 或标准 Agent Skill ZIP 安装"
+                aria-label="从文件安装 Skill"
                 style={{ ...addBtnStyle, fontSize: 11, padding: '2px 7px' }}
               >{installing ? '…' : '📦'}</button>
-              <button onClick={() => setShowSkillTypeSelector(true)} style={addBtnStyle} title="新建 Skill（开发者）">＋</button>
+              <button onClick={() => setShowSkillTypeSelector(true)} style={addBtnStyle} title="新建 Skill（开发者）" aria-label="新建 Skill（开发者）">＋</button>
             </div>
           </div>
           <input ref={fileInputRef} type="file" accept=".awu,.zip" style={{ display: 'none' }} onChange={handleInstallFile} />
-          <div style={cardGridStyle}>
+          <div className="repo-cards" style={cardGridStyle}>
             {skills.map(s => (
               <div
                 key={s.name}
@@ -660,12 +668,12 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
         </div>
 
         {/* ── 右：Prompts ── */}
-        <div style={{ ...columnStyle, paddingLeft: 24 }}>
+        <div className="repo-column" style={{ ...columnStyle, paddingLeft: 24 }}>
           <div style={{ ...columnHeaderStyle, border: 'none', padding: 0 }}>
             <span>📝 Prompts</span>
-            <button onClick={() => openEditor('prompt')} style={addBtnStyle} title="新建 Prompt">＋</button>
+            <button onClick={() => openEditor('prompt')} style={addBtnStyle} title="新建 Prompt" aria-label="新建 Prompt">＋</button>
           </div>
-          <div style={cardGridStyle}>
+          <div className="repo-cards" style={cardGridStyle}>
             {prompts.map(p => (
               <div
                 key={p.id}
@@ -926,7 +934,7 @@ export const RepoPanel: React.FC<Props> = ({ open, workingDir, onClose, onEditin
 const panelStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  padding: '12px 16px',
+  padding: 'var(--ui-space-md, 12px) var(--ui-space-lg, 16px)',
   background: 'var(--theme-bg-secondary)',
   borderBottom: '1px solid var(--theme-border)',
   position: 'relative',
@@ -936,7 +944,7 @@ const panelStyle: React.CSSProperties = {
 const panelEditorStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  padding: '12px 16px',
+  padding: 'var(--ui-space-md, 12px) var(--ui-space-lg, 16px)',
   background: 'var(--theme-bg-secondary)',
   borderBottom: '1px solid var(--theme-border)',
   position: 'relative',
@@ -965,7 +973,7 @@ const columnHeaderStyle: React.CSSProperties = {
 const cardGridStyle: React.CSSProperties = {
   display: 'flex',
   flexWrap: 'wrap',
-  gap: 8,
+  gap: 'var(--ui-space-sm, 8px)',
   overflow: 'auto',
   maxHeight: 200,
   padding: '2px',
@@ -973,7 +981,7 @@ const cardGridStyle: React.CSSProperties = {
 
 const cardStyle: React.CSSProperties = {
   width: 110,
-  padding: '10px 8px 8px',
+  padding: 'var(--ui-space-sm, 10px) 8px var(--ui-space-sm, 8px)',
   borderRadius: 10,
   border: '1px solid var(--theme-border)',
   background: 'var(--theme-bg)',

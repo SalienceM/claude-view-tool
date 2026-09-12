@@ -4,6 +4,8 @@ import { FileTreePanel } from './FileTreePanel';
 import type { AttentionContext } from '../utils/attentionContext';
 import type { FileFocusRequest } from '../utils/fileFocus';
 import { AppModalPortal } from './AppModalPortal';
+import { ActivityBar } from './WorkbenchNavigation';
+import type { SidebarView, WorkbenchTab } from '../utils/workbench';
 
 interface Session {
   id: string;
@@ -33,6 +35,10 @@ interface Backend {
 }
 
 interface Props {
+  view?: SidebarView;
+  onViewChange?: (view: SidebarView) => void;
+  onOpenExtension?: (tab: 'library' | 'market') => void;
+  activeWorkbenchTab?: WorkbenchTab;
   activeSessionId: string | null;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
@@ -58,12 +64,14 @@ interface Props {
 }
 
 // ★ Wrap with React.memo to prevent unnecessary re-renders when parent updates
-export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession, onNewSession, onDeleteSession, onAcknowledgeSession, streamingSessions, completedSessions = new Set(), collapsed, onToggleCollapse, isMobile, width, activeWorkingDir, activeSessionMetaId, activeExecKey, activeExecLabel, activeExecMode, activeBackendId, activeCodexRemoteHost, sessionLimit = 25, fileFocusRequest, onAttentionChange }) => {
+export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession, onNewSession, onDeleteSession, onAcknowledgeSession, streamingSessions, completedSessions = new Set(), collapsed, onToggleCollapse, isMobile, width, activeWorkingDir, activeSessionMetaId, activeExecKey, activeExecLabel, activeExecMode, activeBackendId, activeCodexRemoteHost, sessionLimit = 25, fileFocusRequest, onAttentionChange, view: controlledView, onViewChange, onOpenExtension, activeWorkbenchTab }) => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const refreshGenerationRef = useRef(0);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // ★ 侧栏视图：会话列表 / 文件目录树（本地 ⇄ 远端），左侧小按钮切换
-  const [view, setView] = useState<'sessions' | 'files'>('sessions');
+  const [localView, setLocalView] = useState<SidebarView>('sessions');
+  const view = controlledView ?? localView;
+  const setView = useCallback((next: SidebarView) => { setLocalView(next); onViewChange?.(next); }, [onViewChange]);
   const [backends, setBackends] = useState<Backend[]>([]);
   const [sessionContextMenu, setSessionContextMenu] = useState<{
     session: Session;
@@ -95,7 +103,7 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
   useEffect(() => {
     if (!fileFocusRequest || fileFocusRequest.sessionId !== activeSessionId) return;
     setView('files');
-  }, [fileFocusRequest, activeSessionId]);
+  }, [fileFocusRequest, activeSessionId, setView]);
 
   // ★ Memoize refresh function to avoid re-creating it on every render
   const refresh = useCallback(async () => {
@@ -513,41 +521,14 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
   if (collapsed) {
     return (
       <div className="awu-sidebar" style={collapsedSidebarStyle}>
-        <div style={{ position: 'relative', display: 'inline-block' }}>
-          <button
-            onClick={onToggleCollapse}
-            style={toggleBtnStyle}
-            title="展开侧栏"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 18l6-6-6-6" />
-            </svg>
-          </button>
-          {pendingCount > 0 && (
-            <span style={{
-              position: 'absolute', top: -4, right: -4,
-              minWidth: 14, height: 14, borderRadius: 7,
-              background: '#ef4444', color: '#fff',
-              fontSize: 9, fontWeight: 700, lineHeight: '14px',
-              textAlign: 'center', padding: '0 3px',
-              pointerEvents: 'none',
-            }}>
-              {pendingCount > 9 ? '9+' : pendingCount}
-            </span>
-          )}
-        </div>
-        <button onClick={onNewSession} style={{ ...toggleBtnStyle, marginTop: 4 }} title="New session">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-        </button>
+        <ActivityBar view={view} collapsed pendingCount={pendingCount} onSelect={next => { setView(next); onToggleCollapse?.(); }} />
       </div>
     );
   }
 
   return (
     <div className="awu-sidebar" style={isMobile ? mobileSidebarStyle : { ...sidebarStyle, width: width ?? 260 }}>
+      <ActivityBar view={view} pendingCount={pendingCount} onSelect={setView} />
       <style>{`
         @keyframes awuSidebarRunningPulse {
           0%, 100% { opacity: 1; transform: scale(1); }
@@ -702,7 +683,7 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
           outline-offset: 1px;
         }
       `}</style>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '10px 10px 7px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: 'var(--ui-sidebar-header-padding, 10px 10px 7px)' }}>
         <button
           onClick={onToggleCollapse}
           style={toggleBtnStyle}
@@ -712,13 +693,7 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
             <path d="M15 18l-6-6 6-6" />
           </svg>
         </button>
-        {/* 视图切换：💬 会话 / 🗂 文件 */}
-        <div style={{ display: 'flex', gap: 0, border: '1px solid var(--theme-border)', borderRadius: 5, overflow: 'hidden', background: 'var(--theme-bg-secondary)' }}>
-          <button onClick={() => setView('sessions')} title="会话列表"
-            style={{ ...viewTabStyle, ...(view === 'sessions' ? viewTabActive : {}) }}>💬</button>
-          <button onClick={() => setView('files')} title="文件目录（本地 ⇄ 远端）"
-            style={{ ...viewTabStyle, ...(view === 'files' ? viewTabActive : {}) }}>🗂</button>
-        </div>
+        <strong style={{ fontSize: 12, color: 'var(--theme-text)' }}>{view === 'sessions' ? 'SESSION' : view === 'files' ? '文件资源管理器' : '扩展'}</strong>
         <div style={{ flex: 1 }} />
         {view === 'sessions' && (
           <button onClick={onNewSession} style={newBtnStyle} title="New session">
@@ -754,7 +729,18 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
           )}
         </div>
       )}
-      {view === 'files' ? (
+      {view === 'extensions' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, overflow: 'auto' }}>
+          {([['market', '扩展市场', '查找、比较和安装 Agent Skills'], ['library', 'Skills 与 Prompts', '管理已安装技能、提示词与运行环境']] as const).map(([tab, label, detail]) => (
+            <button key={tab} onClick={() => onOpenExtension?.(tab)} style={{ textAlign: 'left', padding: 12,
+              border: '1px solid var(--theme-border)', borderRadius: 6, cursor: 'pointer', color: 'var(--theme-text)',
+              background: activeWorkbenchTab === tab ? 'var(--theme-accent-bg)' : 'transparent' }}>
+              <strong>{label}</strong><div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.5, color: 'var(--theme-text-muted)' }}>{detail}</div>
+            </button>
+          ))}
+          <p style={{ color: 'var(--theme-text-muted)', fontSize: 11, lineHeight: 1.7 }}>在右侧标签页打开。切回对话不会关闭市场，也不会停止正在进行的会话。</p>
+        </div>
+      ) : view === 'files' ? (
         activeCodexRemoteHost ? (
           <div style={{ margin: 12, padding: 14, border: '1px solid var(--theme-border)', borderRadius: 8, color: 'var(--theme-text-muted)', fontSize: 12, lineHeight: 1.65 }}>
             <div style={{ color: 'var(--theme-text)', fontWeight: 600, marginBottom: 5 }}>🌐 Codex SSH Remote · {activeCodexRemoteHost}</div>
@@ -1521,6 +1507,10 @@ export const Sidebar: React.FC<Props> = memo(({ activeSessionId, onSelectSession
   );
 }, (prevProps, nextProps) => {
   return prevProps.activeSessionId === nextProps.activeSessionId
+    && prevProps.view === nextProps.view
+    && prevProps.onViewChange === nextProps.onViewChange
+    && prevProps.onOpenExtension === nextProps.onOpenExtension
+    && prevProps.activeWorkbenchTab === nextProps.activeWorkbenchTab
     && prevProps.streamingSessions === nextProps.streamingSessions
     && prevProps.completedSessions === nextProps.completedSessions
     && prevProps.collapsed === nextProps.collapsed
@@ -1581,6 +1571,7 @@ function getBackendBadgeColor(backendId: string): string {
 }
 
 const sidebarStyle: React.CSSProperties = {
+  position: 'relative', paddingLeft: 'var(--ui-activity-width, 46px)', boxSizing: 'border-box', minHeight: 0,
   width: 260,
   borderRight: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   display: 'flex',
@@ -1592,6 +1583,7 @@ const sidebarStyle: React.CSSProperties = {
 
 // ★ 移动端：侧栏改为覆盖式抽屉，不挤占聊天区
 const mobileSidebarStyle: React.CSSProperties = {
+  paddingLeft: 46, boxSizing: 'border-box',
   position: 'fixed',
   top: 0,
   bottom: 0,
@@ -1606,7 +1598,7 @@ const mobileSidebarStyle: React.CSSProperties = {
 };
 
 const collapsedSidebarStyle: React.CSSProperties = {
-  width: 40,
+  position: 'relative', width: 'calc(var(--ui-activity-width, 46px) + 1px)',
   borderRight: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   display: 'flex',
   flexDirection: 'column',
@@ -1617,8 +1609,8 @@ const collapsedSidebarStyle: React.CSSProperties = {
 };
 
 const toggleBtnStyle: React.CSSProperties = {
-  width: 30,
-  height: 30,
+  width: 'var(--ui-control-height, 30px)',
+  height: 'var(--ui-control-height, 30px)',
   borderRadius: 5,
   border: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   background: 'transparent',
@@ -1646,8 +1638,8 @@ const viewTabActive: React.CSSProperties = {
 };
 
 const newBtnStyle: React.CSSProperties = {
-  width: 30,
-  height: 30,
+  width: 'var(--ui-control-height, 30px)',
+  height: 'var(--ui-control-height, 30px)',
   borderRadius: 5,
   border: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   background: 'transparent',
@@ -1660,7 +1652,7 @@ const newBtnStyle: React.CSSProperties = {
 };
 
 const searchWrapStyle: React.CSSProperties = {
-  height: 32,
+  height: 'var(--ui-search-height, 32px)',
   margin: '0 9px 7px',
   padding: '0 9px',
   display: 'flex',
@@ -1696,8 +1688,8 @@ const searchClearStyle: React.CSSProperties = {
 };
 
 const itemStyle: React.CSSProperties = {
-  minHeight: 36,
-  padding: '5px 8px',
+  minHeight: 'var(--ui-session-height, 36px)',
+  padding: 'var(--ui-session-padding, 5px 8px)',
   border: '1px solid transparent',
   borderRadius: 5,
   cursor: 'pointer',
@@ -1734,7 +1726,7 @@ const compactBackendStyle: React.CSSProperties = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
-  color: 'var(--theme-text-muted, #656d76)',
+  color: 'var(--theme-text, #1f2328)',
   fontSize: 9,
   lineHeight: '14px',
 };
@@ -1759,7 +1751,7 @@ const groupSectionStyle: React.CSSProperties = {
 
 const groupHeaderStyle: React.CSSProperties = {
   width: '100%',
-  minHeight: 44,
+  minHeight: 'var(--ui-group-height, 44px)',
   display: 'flex',
   alignItems: 'center',
   gap: 9,

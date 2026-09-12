@@ -238,12 +238,37 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   const [customizing, setCustomizing] = React.useState(false);
   const [announcement, setAnnouncement] = React.useState('');
   const customizeButtonRef = React.useRef<HTMLButtonElement>(null);
+  const dashboardRef = React.useRef<HTMLElement>(null);
+  const shellRef = React.useRef<HTMLDivElement>(null);
   const dashboardId = React.useId();
   const titleId = `${dashboardId}-title`;
   const contentId = providedContentId || `${dashboardId}-content`;
   const customizerId = `${dashboardId}-customizer`;
   const busy = viewModel.loadState === 'loading' || viewModel.loadState === 'idle';
   const latestActivity = viewModel.activity[0];
+
+  React.useEffect(() => {
+    const dashboard = dashboardRef.current;
+    const shell = shellRef.current;
+    if (!dashboard || !shell) return;
+    // 标签栏改变可用高度后，浏览器选中的原生滚动锚点并不稳定。
+    // 仅在用户已经滚到底部时跟住新增事件；正在阅读中间内容时不抢滚动。
+    let atBottom = false;
+    const rememberPosition = () => {
+      if (!dashboard.clientHeight) return; // 扩展 Tab 隐藏首页时不能重置位置。
+      atBottom = dashboard.scrollHeight > dashboard.clientHeight
+        && dashboard.scrollHeight - dashboard.clientHeight - dashboard.scrollTop <= 4;
+    };
+    dashboard.addEventListener('scroll', rememberPosition, { passive: true });
+    const observer = new ResizeObserver(() => {
+      if (atBottom && dashboard.clientHeight) dashboard.scrollTop = dashboard.scrollHeight;
+    });
+    observer.observe(shell);
+    return () => {
+      dashboard.removeEventListener('scroll', rememberPosition);
+      observer.disconnect();
+    };
+  }, []);
 
   React.useEffect(() => {
     if (!customizing) return;
@@ -266,10 +291,10 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
   }, [latestActivity?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <main className={`home-dashboard density-${preferences.density}`} aria-busy={busy} aria-labelledby={titleId}>
+    <main ref={dashboardRef} className={`home-dashboard density-${preferences.density}`} aria-busy={busy} aria-labelledby={titleId}>
       {showSkipLink && <a className="home-skip-link" href={`#${contentId}`}>跳到首页主要内容</a>}
       <div className="home-sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
-      <div className="home-shell">
+      <div ref={shellRef} className="home-shell">
         <header className="home-heading">
           <div>
             <p className="home-eyebrow">AGENTWITHU · CONTROL CENTER</p>
@@ -535,6 +560,22 @@ export const HomeDashboard: React.FC<HomeDashboardProps> = ({
         @media (max-width: 620px) {
           .home-status { grid-template-columns:1fr; }
           .home-action-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+        }
+        @media (min-width:769px) and (pointer:fine) {
+          /* 只改工作台卡片，不影响 Markdown / 文件预览；首页自身的“紧凑”选项仍可再收一档。 */
+          .home-dashboard .home-shell { padding:var(--ui-home-padding, 16px 20px 24px); }
+          .home-dashboard .home-heading { gap:16px; margin-bottom:14px; }
+          .home-dashboard .home-module-grid { gap:8px; }
+          .home-dashboard .home-status-item { padding:10px 12px; gap:8px; }
+          .home-dashboard .home-action-grid button { min-height:50px; padding:8px 10px; }
+          .home-dashboard .home-card-header { min-height:34px; padding:0 10px; }
+          .home-dashboard .home-list-row { min-height:40px; padding:6px 10px; gap:8px; }
+          .home-dashboard .home-model { padding:9px 11px; }
+          .home-dashboard .home-metrics div { padding:9px 4px; }
+          .home-dashboard .home-activity { padding:3px 10px; }
+          .home-dashboard .home-activity li { min-height:32px; }
+          .home-dashboard.density-compact .home-list-row { min-height:36px; padding:4px 10px; }
+          .home-dashboard.density-compact .home-action-grid button { min-height:44px; padding:6px 10px; }
         }
         @media (pointer:coarse) {
           .home-list-row, .home-model, .home-status-item, .home-action-grid button,

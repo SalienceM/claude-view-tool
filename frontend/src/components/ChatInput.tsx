@@ -129,6 +129,7 @@ interface Props {
     content: string,
     images?: ImageAttachment[],
     textAttachments?: TextAttachment[],
+    kitApprovalDelegation?: boolean,
   ) => void;
   onAbort: () => void;
   isStreaming: boolean;
@@ -245,6 +246,13 @@ const ChatInputInner: React.FC<Props> = ({
   const { images, removeImage, clearImages, addImage } = useClipboardImage(ref);
   const [textAttachments, setTextAttachments] = useState<TextAttachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState('');
+  const [kitApprovalDelegation, setKitApprovalDelegation] = useState(false);
+  const kitApprovalDelegationRef = useRef(false);
+  kitApprovalDelegationRef.current = kitApprovalDelegation;
+  useEffect(() => {
+    setKitApprovalDelegation(false);
+    kitApprovalDelegationRef.current = false;
+  }, [sessionId, activeBackendId, isStreaming, seqCount]);
   const textAttachmentsRef = useRef<TextAttachment[]>([]);
   textAttachmentsRef.current = textAttachments;
 
@@ -1074,6 +1082,11 @@ const ChatInputInner: React.FC<Props> = ({
     const imgs = imagesRef.current;
     const textFiles = textAttachmentsRef.current;
     if (!text && imgs.length === 0 && textFiles.length === 0) return;
+    // 不把本次委托悄悄带入自动队列、斜杠命令或未来轮次。
+    if (kitApprovalDelegationRef.current && (isStreamingRef.current || seqCountRef.current > 0 || text.startsWith('/'))) {
+      setAttachmentNotice('Kit 委托只支持空闲时直接发送普通消息，请取消勾选或等待当前轮结束。');
+      return;
+    }
     // ★ 图像 backend：自动注入 --size 参数
     if (isImageBackendRef.current && imageSizeRef.current && imageSizeRef.current !== 'auto' && text) {
       text = `${text} --size ${imageSizeRef.current}`;
@@ -1093,8 +1106,11 @@ const ChatInputInner: React.FC<Props> = ({
         text,
         imgs.length > 0 ? imgs : undefined,
         textFiles.length > 0 ? textFiles : undefined,
+        kitApprovalDelegationRef.current,
       );
     }
+    kitApprovalDelegationRef.current = false;
+    setKitApprovalDelegation(false);
     if (ref.current) {
       ref.current.value = '';
       textareaHeightCappedRef.current = false;
@@ -1500,7 +1516,7 @@ const ChatInputInner: React.FC<Props> = ({
   const parentDir = showFilePicker ? getParentDir(currentDir) : null;
 
   return (
-    <div className="awu-composer" style={{ padding: '9px 18px 14px', borderTop: isStreaming ? '1px solid var(--theme-success-border, rgba(50,182,122,.35))' : '1px solid transparent', background: 'var(--theme-bg, #ffffff)', position: 'relative', transition: 'border-top-color 0.2s ease' }}>
+    <div className="awu-composer" style={{ padding: 'var(--ui-composer-padding, 9px 18px 14px)', borderTop: isStreaming ? '1px solid var(--theme-success-border, rgba(50,182,122,.35))' : '1px solid transparent', background: 'var(--theme-bg, #ffffff)', position: 'relative', transition: 'border-top-color 0.2s ease' }}>
       <input
         ref={attachmentInputRef}
         type="file"
@@ -1561,6 +1577,13 @@ const ChatInputInner: React.FC<Props> = ({
         </div>
       )}
       {/* ★ 工具栏：统一的图标按钮 */}
+      {!isImageBackend && <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+        fontSize: 11, color: kitApprovalDelegation ? 'var(--theme-text)' : 'var(--theme-text-muted)' }}
+        title="只授权本次发送所选的一个 Kit 运行/链；6 小时有效。Agent 核对冻结计划后可正式发布。不会由普通文字自动授权，不继承到队列、语音或下次发送。">
+        <input type="checkbox" aria-label="本次允许 Kit 代确认" checked={kitApprovalDelegation}
+          disabled={isStreaming || seqCount > 0} onChange={event => setKitApprovalDelegation(event.target.checked)} />
+        本次允许 Kit 代确认{kitApprovalDelegation ? ' · 一个运行，6 小时内有效' : ''}
+      </label>}
       <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <ToolbarBtn
           icon="⚡"
@@ -1942,7 +1965,7 @@ const textareaStyle: React.CSSProperties = {
   border: '1px solid var(--theme-border, rgba(0,0,0,0.12))',
   borderRadius: 7,
   color: 'var(--theme-text, #1f2328)',
-  padding: '11px 14px',
+  padding: 'var(--ui-message-padding, 11px 14px)',
   fontSize: 14,
   lineHeight: 1.5,
   resize: 'none',
@@ -1954,8 +1977,8 @@ const textareaStyle: React.CSSProperties = {
 };
 
 const btnBase: React.CSSProperties = {
-  width: 38,
-  height: 38,
+  width: 'var(--ui-send-size, 38px)',
+  height: 'var(--ui-send-size, 38px)',
   borderRadius: 6,
   border: '1px solid transparent',
   color: '#fff',

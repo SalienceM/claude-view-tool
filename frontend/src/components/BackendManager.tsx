@@ -129,7 +129,7 @@ function _cleanHeaders(h: Record<string, string> | undefined): Record<string, st
 }
 
 const inputStyle: React.CSSProperties = {
-  width: '100%', padding: '10px 12px',
+  width: '100%', padding: 'var(--ui-field-padding, 10px 12px)',
   background: 'var(--theme-input-bg)',
   border: '1px solid var(--theme-border)', borderRadius: 6,
   color: 'var(--theme-text)', fontSize: 13, outline: 'none',
@@ -3025,7 +3025,7 @@ const overlayStyle: React.CSSProperties = {
 
 const panelStyle: React.CSSProperties = {
   background: 'var(--theme-bg-tertiary)', border: '1px solid var(--theme-border)', borderRadius: 12,
-  padding: 24, width: '90%', maxWidth: 520,
+  padding: 'var(--ui-space-xl, 24px)', width: '90%', maxWidth: 520,
   maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto',
   overscrollBehavior: 'contain', boxSizing: 'border-box',
 };
@@ -3036,8 +3036,8 @@ const closeBtnStyle: React.CSSProperties = {
 };
 
 const backendItemStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12,
-  padding: 12, marginBottom: 8,
+  display: 'flex', alignItems: 'center', gap: 'var(--ui-space-md, 12px)',
+  padding: 'var(--ui-space-md, 12px)', marginBottom: 'var(--ui-space-sm, 8px)',
   background: 'rgba(255,255,255,0.05)', borderRadius: 8,
   cursor: 'pointer', transition: 'all 0.15s',
 };
@@ -3082,7 +3082,7 @@ const labelStyle: React.CSSProperties = {
 };
 
 const selectStyle: React.CSSProperties = {
-  width: '100%', padding: '10px 12px',
+  width: '100%', padding: 'var(--ui-field-padding, 10px 12px)',
   background: 'var(--theme-bg-tertiary)',
   border: '1px solid var(--theme-border)', borderRadius: 6,
   color: 'var(--theme-text)', fontSize: 13, outline: 'none', cursor: 'pointer',

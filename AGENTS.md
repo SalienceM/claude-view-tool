@@ -554,6 +554,36 @@ Loop RPCs: `loopGetState`, `loopSubmitIdea`, `loopRemoveIdea`, `loopSealIdea`,
 `loopTakeover`, `loopRelease`, `loopSetAuto`, `loopAdvanceToOut`, `loopContinue`, `loopAsk`, `loopAddAddon`,
 `loopRemoveAddon`, `loopEditAddon`, `loopGetRecord`. `createSession` takes an optional third `session_type` argument.
 
+### Session workbench tabs
+
+**Desktop UI density.** `frontend/src/utils/uiDensity.ts` supplies shared `--ui-*`
+spacing/height tokens to `.app-root` only for viewports wider than 768px with a fine
+pointer. Desktop workbench chrome, Session rows, composer, Settings, Backend/connection
+forms, extension and Kit/LOOP panels use these tokens; inline fallbacks preserve the
+existing narrow-screen/touch dimensions. This is spacing, not zoom: never scale fonts,
+Markdown, file previews or canvases with a universal selector. The desktop sidebar
+defaults to 272px including its 40px activity rail; a saved drag-resized width is kept.
+HomeDashboard keeps its independent compact/comfortable preference within the tighter
+desktop shell. Validate both themes, desktop/touch bounds and text-size invariance in
+`frontend/tests/acceptance/ui-density.spec.ts` when changing these tokens.
+
+The top workbench tab ledger (`frontend/src/utils/workbench.ts`) contains the permanent
+`chat` overview tab, unique `session:<id>` tabs opened by user navigation, and `library` /
+`market` extension tabs. It must never eagerly open or hydrate the entire Session list.
+`paneSessions` still assigns visible split-grid slots; selecting a Session already visible
+in another slot focuses that slot instead of duplicating its renderer. Each open Session
+has one keyed, kept-mounted `ChatPane`; switching tabs or extension pages hides it without
+discarding the draft, transcript, pagination or scroll state. `ChatPane.isVisible` prevents
+hidden streaming updates from resetting scroll offsets, and `isFocused` gates keyboard,
+screenshot and attention actions. Closing a Session tab only removes its view, never calls
+abort/delete RPCs; Session-owned `AppModalPortal` overlays inherit the same visibility
+through `AppModalVisibilityContext`, so hidden tabs cannot leave floating dialogs behind.
+Executor tasks and global stream bookkeeping survive. Session deletion,
+migration and authenticated-user changes remove/remap/reset tabs with the existing pane
+and ownership boundaries. Tab titles are live Session metadata, not tab identity. Running /
+completion indicators use the shared Session sets. Overflow scrolling is local to the tab
+bar; do not scroll the whole chat document when revealing the active tab.
+
 ### Workspace Kits (experimental)
 
 Workspace Kits are Session-level standard accessories stored separately in
@@ -583,14 +613,33 @@ Workspace Kits are Session-level standard accessories stored separately in
   skip everything after the first failed step. The backend owns the authoritative
   `KitRun`/step verdict; a desktop client only claims and performs explicit client
   actions. Scheduled runs that require a client fail closed when no client can act.
+- Chat-created chains carry `chatChain` provenance and reuse a deterministic key of their
+  ordered `kit_call` ids/inputs, DSL and contract (not titles or run ids). A new request
+  creates a new run on the existing definition; a retry still returns its original run.
+  The live child DSL is expanded afresh, while old run plans remain frozen. Idle, pristine
+  legacy duplicates are archived through `WorkspaceKitState.chain_aliases`; they are not
+  deleted or rewritten. List/push payloads show one canonical card and project
+  `KitRun.canonicalKitId` for combined history/last-run display, preserving original
+  `kitId`, steps, versions and approval scope. Active runs/terminals, optimized chains and
+  conflicting enable states are not automatically merged. Deleting a canonical card
+  removes its archived definitions as well, but retains all run history.
 - `awu_capability` is the white-listed protocol bridge from deterministic Kit DSL to
   AgentWithU product services; a Kit can never name an arbitrary Bridge RPC. The first
   registered capability is `release.publish_latest`. It scans and filters fresh build
   artifacts, calls Release Center preview to freeze a plan, then persists
   `waiting_approval`. Formal publishing cannot start until `kitCapabilityRespond` records
-  an independent human approval bound to the plan fingerprint. AI generation may prepare
-  the plan but cannot approve it; Schedule fails closed before invoking an approval-required
-  capability. After approval, the existing Release Center
+  a human approval or a validated one-run chat delegation bound to the plan fingerprint.
+  ChatInput's default-off `kitApprovalDelegation` send field is the only chat opt-in;
+  prose, attachments, generated Kit DSL and model tool arguments cannot grant permission.
+  `ChatKitTools` binds this opt-in to one run/chain, owner, Session workspace, capability
+  arguments and release-config fingerprint for six hours. The first prepared plan's
+  fingerprint is then frozen in `KitRun.approval_delegation`. `approve` requires a fresh
+  `status` review in the live chat lease, exact step/plan fingerprint, node permission,
+  successful preflight and an unchanged grant scope. Repeated confirmations return the
+  same receipt, and the shared responder audits `source=chat-delegated`, user message and
+  delegation id. A grant survives chat completion for that run, not for another run;
+  queue, realtime voice and subsequent sends do not inherit the opt-in. Generation and
+  Schedule still cannot grant or self-approve. After approval, the existing Release Center
   job owns upload/manifest semantics while bounded progress is mirrored into `KitStepRun`;
   cancelling the Kit also cancels the release job. Capability metadata declares risk,
   physical-node permission and approval policy in `src/backend/kit_capabilities.py`.
@@ -658,12 +707,25 @@ Optimization dialogue and candidate provenance persist with the Kit, while versi
 a Kit concept independent of which backend produced them. Details always shows the version
 ledger and allows viewing or safely reactivating any historical DSL.
 
+The UI submits through short `kitOptimizeStart` RPCs; the executor owns a per-Session/Kit
+background task independent of the window and WebSocket lifetime. The legacy awaited
+`kitOptimizeAsk` remains compatible, but new clients must not await model completion on
+the serial WebSocket dispatcher. `kitOptimizeGet.running` is authoritative; compact
+`kitUpdated` metadata advertises optimization running/revision changes. Reopening restores
+history independently of Backend-list loading, with event refresh and visible-window polling
+while generating. Duplicate submissions and deleting an optimizing Kit are rejected;
+orphaned `answering` messages after executor restart become explicit interrupted errors.
+Kit and optimizer overlays close only via their close controls, not the backdrop. Unsent
+optimizer drafts/Backend selections stay in controller tab sessionStorage scoped by user,
+Session and Kit, with a bounded memory fallback; accepted messages/results persist on the
+executor. Closing the window does not cancel optimization; stopping the executor does.
+
 Kit RPCs include `kitGenerate`, `kitCapabilityList`, `kitGetState`, `kitCreate`, `kitUpdate`, `kitDelete`,
 `kitRun`, `kitCancel`, `kitResume`, `kitClientStepStart`, `kitClientStepComplete`,
 `kitCapabilityRespond`,
 `kitClientFileStart`, `kitClientFileChunk`, `kitClientFileFinish`,
 `kitSetControlMode`, `kitTerminalCommand`, `kitTerminalClose`, `kitVersionList`,
-`kitVersionGet`, `kitVersionActivate`, `kitOptimizeGet`, `kitOptimizeAsk`, and
+`kitVersionGet`, `kitVersionActivate`, `kitOptimizeGet`, `kitOptimizeStart`, `kitOptimizeAsk`, and
 `kitOptimizeFinalize`.
 
 ### Release Center (optional maintainer workbench)
@@ -681,8 +743,8 @@ history under `~/.agent-with-u/release-center/`. Build is never publish: Windows
 scripts call `scripts/register_release_candidate.py` after successful packaging, and a Kit
 file output may set `releaseCandidate=true`; both paths only upsert a candidate. A Kit may
 separately use the white-listed `release.publish_latest` capability to orchestrate the same
-scan/preview/publish services, but it still stops at a durable human-approval boundary and
-never bypasses the frozen plan. The UI lets
+scan/preview/publish services, but it still stops at a durable approval boundary (human
+or validated one-run chat delegation) and never bypasses the frozen plan. The UI lets
 the maintainer select artifacts, edit platform/install metadata, compare the current channel
 manifest, inspect SHA-256/size/object keys, and freeze a plan. Formal publish requires a
 second acknowledgement + confirmation, re-hashes every frozen file, then invokes an already

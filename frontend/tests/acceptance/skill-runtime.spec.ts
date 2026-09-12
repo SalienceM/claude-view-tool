@@ -3,16 +3,17 @@ import { execFileSync } from 'node:child_process';
 
 test('complete skill import opens a confirmation-based runtime check and persists readiness', async ({ page }, testInfo) => {
   // 仅使用隔离的 HOME_QA 数据；不访问网络，不安装任何第三方包。
+  const skillName = `qa-runtime-${testInfo.project.name}`;
   const archive = execFileSync('python', ['-c', [
     'import io,zipfile,sys,json',
     'buf=io.BytesIO()',
     'z=zipfile.ZipFile(buf,"w")',
-    'z.writestr("SKILL.md", "---\\nname: qa-runtime-test\\ndescription: Offline runtime acceptance skill\\n---\\nUse bundled template.")',
+    'z.writestr("SKILL.md", "---\\nname: " + sys.argv[1] + "\\ndescription: Offline runtime acceptance skill\\n---\\nUse bundled template.")',
     'z.writestr("assets/template.txt", "fixture resource")',
     'z.writestr("awu-runtime.json", json.dumps({"version":1,"requiredFiles":["assets/template.txt"]}))',
     'z.close()',
     'sys.stdout.buffer.write(buf.getvalue())',
-  ].join('\n')]);
+  ].join('\n'), skillName]);
   await page.goto('/');
   await page.getByRole('button', { name: '更多功能', exact: true }).click();
   await page.getByText('Skills 与 Prompts', { exact: true }).click();
@@ -30,6 +31,6 @@ test('complete skill import opens a confirmation-based runtime check and persist
   await page.screenshot({ path: testInfo.outputPath('skill-runtime-ready.png') });
   await dialog.getByRole('button', { name: '关闭运行准备' }).click();
   await page.getByRole('button', { name: '确定', exact: true }).click();
-  await page.locator('.repo-card').filter({ hasText: 'qa-runtime-test' }).getByRole('button', { name: '运行准备 / 状态' }).click();
+  await page.locator('.repo-card').filter({ hasText: skillName }).getByRole('button', { name: '运行准备 / 状态' }).click();
   await expect(dialog.getByRole('heading', { name: '运行检查通过' })).toBeVisible();
 });

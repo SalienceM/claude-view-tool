@@ -205,6 +205,16 @@ test.describe.serial('small-screen touch dashboard acceptance', () => {
     await expect(refreshedBackendField.getByText(/Backend 负责账号/)).toBeVisible();
   });
 
+  test('live updates do not pull readers from the middle of the dashboard to the bottom', async ({ page, request }) => {
+    await openCleanHome(page);
+    const dashboard = page.locator('.home-dashboard');
+    await dashboard.evaluate(element => { element.scrollTop = 100; element.dispatchEvent(new Event('scroll')); });
+    const eventResponse = await request.get(`${CONTROL_URL}/event/task`);
+    expect(eventResponse.ok()).toBeTruthy();
+    await expect(page.locator('.home-status-item').nth(2).locator('strong')).toHaveText('25');
+    await expect.poll(() => dashboard.evaluate(element => element.scrollTop)).toBe(100);
+  });
+
   test('scrolling and a live update remain stable', async ({ page, request }, testInfo) => {
     await openCleanHome(page);
     const dashboard = page.locator('.home-dashboard');

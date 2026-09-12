@@ -176,6 +176,42 @@ class SkillMarket:
             str, tuple[float, list[dict], str, list[dict]]
         ] = {}
         self._custom_sources = self._load_custom_sources()
+        self._repository_cache: dict[str, tuple[float, dict]] = {}
+
+    async def _repository_info(self, source: dict, *, force: bool = False) -> dict:
+        """可选的仓库级参考信息；限流/失败不影响 Skill 目录或安装。"""
+        repository = source["repository"]
+        cached = self._repository_cache.get(repository)
+        if cached and not force and time.time() - cached[0] < CACHE_TTL_SECONDS:
+            return cached[1]
+        kwargs = self._client_kwargs()
+        kwargs.update(timeout=httpx.Timeout(4.0), follow_redirects=False)
+        kwargs["headers"] = {"User-Agent": "AgentWithU-SkillMarket/1.0", "Accept": "application/vnd.github+json"}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        info: dict = {"checkedAt": int(time.time())}
+        async with httpx.AsyncClient(**kwargs) as client:
+            async def read(suffix: str) -> dict:
+                response = await client.get(f"https://api.github.com/repos/{repository}{suffix}")
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid GitHub metadata")
+                return data
+            repo, release = await asyncio.gather(read(""), read("/releases/latest"), return_exceptions=True)
+        if isinstance(repo, dict):
+            stars = repo.get("stargazers_count")
+            if isinstance(stars, int) and stars >= 0:
+                info["stars"] = stars
+            info["pushedAt"] = str(repo.get("pushed_at") or "")[:40]
+            info["archived"] = bool(repo.get("archived"))
+        else:
+            info["error"] = "仓库热度/更新时间暂不可用（网络或 GitHub 限流）；不影响安装"
+        if isinstance(release, dict):
+            info["latestRelease"] = str(release.get("tag_name") or "")[:200]
+            info["releasePublishedAt"] = str(release.get("published_at") or "")[:40]
+        self._repository_cache[repository] = (time.time(), info)
+        return info
 
     def _load_custom_sources(self) -> list[dict]:
         if not self._sources_file.exists():
@@ -346,7 +382,7 @@ class SkillMarket:
         )
         return inspected, effective_ref, issues
 
-    def _public_item(self, source: dict, candidate: dict, effective_ref: str) -> dict:
+    def _public_item(self, source: dict, candidate: dict, effective_ref: str, repository_info: Optional[dict] = None) -> dict:
         name = candidate["name"]
         installed = self._skill_store.get_skill(name)
         installed_source = installed.get("source") if installed else None
@@ -382,6 +418,9 @@ class SkillMarket:
             "license": _display_value(frontmatter.get("license", "")),
             "compatibility": _display_value(frontmatter.get("compatibility", "")),
             "metadata": _json_safe(frontmatter.get("metadata")) if isinstance(frontmatter.get("metadata"), dict) else {},
+            "version": _display_value((frontmatter.get("metadata") or {}).get("version", ""))
+            if isinstance(frontmatter.get("metadata"), dict) else "",
+            "repositoryInfo": repository_info or {},
             "fileNames": candidate.get("fileNames", []),
             "fileCount": candidate.get("fileCount", 0),
             "size": candidate.get("size", 0),
@@ -414,19 +453,27 @@ class SkillMarket:
                 )
                 return source, [], str(source.get("ref") or "main"), str(exc), []
 
-        loaded = await asyncio.gather(*(load(source) for source in sources))
+        catalogs, repository_infos = await asyncio.gather(
+            asyncio.gather(*(load(source) for source in sources)),
+            asyncio.gather(*(self._repository_info(source, force=force) for source in sources), return_exceptions=True),
+        )
+        loaded = catalogs
         items: list[dict] = []
         public_sources: list[dict] = []
-        for source, candidates, effective_ref, error, issues in loaded:
+        for index, (source, candidates, effective_ref, error, issues) in enumerate(loaded):
+            repository_info = repository_infos[index] if isinstance(repository_infos[index], dict) else {
+                "error": "仓库参考信息暂不可用；不影响安装",
+            }
             source_payload = dict(source)
             source_payload["error"] = error
             source_payload["skillCount"] = len(candidates)
             source_payload["skippedCount"] = len(issues)
             source_payload["issues"] = issues
             source_payload["effectiveRef"] = effective_ref
+            source_payload["repositoryInfo"] = repository_info
             public_sources.append(source_payload)
             for candidate in candidates:
-                items.append(self._public_item(source, candidate, effective_ref))
+                items.append(self._public_item(source, candidate, effective_ref, repository_info))
 
         needle = str(query or "").strip().casefold()
         if needle:

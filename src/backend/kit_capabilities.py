@@ -1,7 +1,7 @@
 """Workspace Kit 到 AgentWithU 内建服务的受控能力协议。
 
 Kit 只能按这里注册的稳定 capability id 调用产品能力，不能把任意 Bridge RPC
-名称当作步骤执行。高风险能力先生成不可变计划，再等待独立的人类确认。
+名称当作步骤执行。高风险能力先生成不可变计划，再等待人类或有效的单次委托确认。
 """
 from __future__ import annotations
 
@@ -72,6 +72,8 @@ def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "channel": str(plan.get("channel") or ""),
         "manifestUrl": str(plan.get("manifestUrl") or ""),
         "manifestKey": str(plan.get("manifestKey") or ""),
+        "qiniuBucket": str(plan.get("qiniuBucket") or ""),
+        "retentionCount": int(plan.get("retentionCount") or 0),
         "artifacts": [
             dict(item) for item in (manifest.get("artifacts") or [])
             if isinstance(item, dict)
@@ -89,7 +91,7 @@ def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
 class ReleasePublishLatestCapability:
     id = "release.publish_latest"
     title = "发布最新包"
-    description = "扫描当前工作区的最新制品，冻结发布计划，并在人工确认后正式发布。"
+    description = "扫描当前工作区的最新制品，冻结发布计划，并在人工或有效的本次委托确认后正式发布。"
     risk_level = "high"
     permission = "node.release.manage"
     approval = "required"
@@ -212,7 +214,7 @@ class ReleasePublishLatestCapability:
             "plan": public_plan,
             "message": (
                 "发布预检存在阻断项" if blockers
-                else "发布计划已冻结，等待人工确认正式发布"
+                else "发布计划已冻结，等待人工确认或已获本次委托的 Agent 核对后确认"
             ),
         }
 

@@ -124,6 +124,7 @@ const SUB_ORDER = ['prepare', 'execute', 'analysis', 'done'];
 
 export interface LoopPanelProps {
   sessionId: string;
+  headerActions?: React.ReactNode;
   onClose?: () => void;
   embedded?: boolean;   // true = 作为会话内容内嵌渲染（无浮层、无关闭按钮）
   inspectOnly?: boolean; // true = 人工接管期间的只读总览（保留面板/流程，不暴露状态变更操作）
@@ -153,7 +154,7 @@ const LoopPromptTextarea: React.FC<LoopPromptTextareaProps> = (props) => {
 
 export const LoopPanel: React.FC<LoopPanelProps> = ({
   sessionId, onClose, embedded, inspectOnly = false, sessionBackendId, sessionRuntime, backends,
-  workingDir, execKey,
+  workingDir, execKey, headerActions,
 }) => {
   const [state, setState] = useState<LoopStateT | null>(null);
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
@@ -357,6 +358,7 @@ export const LoopPanel: React.FC<LoopPanelProps> = ({
     return wrap(
       <>
         <Header stage="…" sessionId={sessionId}
+          actions={headerActions}
           onClose={onClose}
           embedded={embedded} inspectOnly={inspectOnly} />
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--theme-text-muted)' }}>
@@ -370,6 +372,7 @@ export const LoopPanel: React.FC<LoopPanelProps> = ({
     <LoopPromptContext.Provider value={{ sessionId, workingDir, execKey }}>
       <>
         <Header stage={stateForView.stage} sessionId={sessionId}
+          actions={headerActions}
           onClose={onClose} embedded={embedded} inspectOnly={inspectOnly}
           viewMode={viewMode} setViewMode={setViewMode} canFlow={stateForView.stage !== 'loopidea'} />
         <StageRail stage={stateForView.stage} />
@@ -384,7 +387,7 @@ export const LoopPanel: React.FC<LoopPanelProps> = ({
 
         <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <div style={{ flex: 1, overflow: 'auto', padding: '12px 18px 24px' }}>
+            <div style={{ flex: 1, overflow: 'auto', padding: 'var(--ui-loop-body-padding, 12px 18px 24px)' }}>
               {!inspectOnly && <IntentBanner state={stateForView} sessionId={sessionId} />}
               {stateForView.stage === 'loopidea' ? (
                 <>
@@ -483,11 +486,12 @@ const IntentBanner: React.FC<{ state: LoopStateT; sessionId: string }> = ({ stat
 const Header: React.FC<{
   stage: string;
   sessionId: string;
+  actions?: React.ReactNode;
   onClose?: () => void; embedded?: boolean; inspectOnly?: boolean;
   viewMode?: 'panel' | 'flow'; setViewMode?: (v: 'panel' | 'flow') => void; canFlow?: boolean;
-}> = ({ stage, sessionId, onClose, embedded, inspectOnly, viewMode, setViewMode, canFlow }) => (
+}> = ({ stage, sessionId, actions, onClose, embedded, inspectOnly, viewMode, setViewMode, canFlow }) => (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', flexWrap: 'wrap',
+      display: 'flex', alignItems: 'center', gap: 'var(--ui-space-sm, 10px)', padding: 'var(--ui-loop-header-padding, 12px 18px)', flexWrap: 'wrap',
       borderBottom: '1px solid var(--theme-border)',
     }}>
       <span style={{ fontSize: 18 }}>🔁</span>
@@ -509,6 +513,7 @@ const Header: React.FC<{
       )}
       <div style={{ flex: 1 }} />
       <TokenUsageMonitor sessionId={sessionId} placement="header" />
+      {actions}
       {!embedded && onClose && <button onClick={onClose} style={btn}>✕ 关闭</button>}
     </div>
   );
@@ -518,7 +523,7 @@ const StageRail: React.FC<{ stage: string }> = ({ stage }) => {
   const stages = ['loopidea', 'loopexecute', 'loopout'];
   const cur = stages.indexOf(stage);
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 0, padding: '10px 18px', borderBottom: '1px solid var(--theme-border)' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 0, padding: 'var(--ui-loop-rail-padding, 10px 18px)', borderBottom: '1px solid var(--theme-border)' }}>
       {stages.map((s, i) => (
         <React.Fragment key={s}>
           <div style={{
@@ -1847,14 +1852,14 @@ const inputBase: React.CSSProperties = {
   color: 'var(--theme-text)', borderRadius: 8, padding: '8px 10px', fontSize: 13, outline: 'none', fontFamily: 'inherit',
 };
 const metricBox: React.CSSProperties = {
-  padding: '8px 14px', borderRadius: 10, background: 'var(--theme-bg-secondary)',
+  padding: 'var(--ui-space-sm, 8px) var(--ui-space-md, 14px)', borderRadius: 10, background: 'var(--theme-bg-secondary)',
   border: '1px solid var(--theme-border)', minWidth: 90,
 };
 const ideaCard: React.CSSProperties = {
-  padding: 12, borderRadius: 10, background: 'var(--theme-bg-secondary)', border: '1px solid var(--theme-border)',
+  padding: 'var(--ui-section-padding, 12px)', borderRadius: 10, background: 'var(--theme-bg-secondary)', border: '1px solid var(--theme-border)',
 };
 const sealBox: React.CSSProperties = {
-  padding: 14, borderRadius: 12, background: 'var(--theme-bg-tertiary)', border: '1px solid var(--theme-border)',
+  padding: 'var(--ui-section-padding, 14px)', borderRadius: 12, background: 'var(--theme-bg-tertiary)', border: '1px solid var(--theme-border)',
 };
 const miniX: React.CSSProperties = {
   background: 'none', border: 'none', color: 'var(--theme-text-muted)', cursor: 'pointer', fontSize: 12, padding: 2,

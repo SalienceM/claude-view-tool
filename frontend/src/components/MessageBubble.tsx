@@ -1623,7 +1623,7 @@ function MessageBubbleInner({
       style={{
         display: 'flex',
         justifyContent: isUser ? 'flex-end' : 'flex-start',
-        padding: '5px 20px',
+        padding: '5px var(--ui-message-gutter, 20px)',
         animation: animateIn ? 'msgSlideIn 0.22s ease-out' : undefined,
       }}
     >
@@ -1650,7 +1650,7 @@ function MessageBubbleInner({
           position: 'relative',
           maxWidth: '82%',
           minWidth: 60,
-          padding: '11px 14px',
+          padding: 'var(--ui-message-padding, 11px 14px)',
           borderRadius: isUser ? '8px 8px 3px 8px' : '8px 8px 8px 3px',
           background: isUser ? 'var(--theme-user-bubble-bg, #ddf4ff)' : 'var(--theme-message-bg, #f6f8fa)',
           border: `1px solid ${isUser ? 'var(--theme-user-bubble-border, #0969da44)' : 'var(--theme-border, rgba(0,0,0,0.12))'}`,
